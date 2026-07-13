@@ -17,6 +17,7 @@
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "vis.h"
 #include "plugin.h"
 #include "defines.h"
@@ -45,6 +46,48 @@ HINSTANCE WASABI_API_LNG_HINST = 0, WASABI_API_ORIG_HINST = 0;
 static int host_rand_fn(void) { return (rand() ^ (rand() << 8)) & 0x7fffffff; }
 int (*warand)(void) = host_rand_fn;
 
+// Minimal stand-in for Winamp's localization service. The engine has ~280
+// WASABI_API_LNGSTRINGW(...) call sites (preset-name overlay, menus, error
+// text) that dispatch through WASABI_API_LNG; with no Winamp there is no real
+// service, so without this the first preset-name lookup dereferences a null
+// pointer and crashes. The stub returns empty strings instead. (UI/menu text is
+// therefore blank in M1 — fine, M1 is menu-free; real localized text is later.)
+class HostLanguageStub : public api_language
+{
+public:
+    int _dispatch(int msg, void *retval, void **params = 0, int nparam = 0)
+    {
+        switch (msg)
+        {
+        case API_LANGUAGE_GETSTRINGW:
+        case API_LANGUAGE_GETSTRINGFROMGUIDW:
+        {
+            static wchar_t emptyW[1] = { 0 };
+            wchar_t *str = 0; size_t maxlen = 0;
+            if (nparam >= 5) { str = *(wchar_t **)params[3]; maxlen = *(size_t *)params[4]; }
+            wchar_t *out = emptyW;
+            if (str && maxlen) { str[0] = 0; out = str; }
+            if (retval) *(wchar_t **)retval = out;
+            return 1;
+        }
+        case API_LANGUAGE_GETSTRING:
+        case API_LANGUAGE_GETSTRINGFROMGUID:
+        {
+            static char emptyA[1] = { 0 };
+            char *str = 0; size_t maxlen = 0;
+            if (nparam >= 5) { str = *(char **)params[3]; maxlen = *(size_t *)params[4]; }
+            char *out = emptyA;
+            if (str && maxlen) { str[0] = 0; out = str; }
+            if (retval) *(char **)retval = out;
+            return 1;
+        }
+        default:
+            return 0; // let _call fall back to its default value (0/NULL)
+        }
+    }
+};
+static HostLanguageStub g_langStub;
+
 // The engine references the Winamp module descriptor (normally in vis.cpp). In
 // standalone we never dispatch through it — we call PluginRender() directly — so
 // a zeroed instance with null entry-point pointers is all the linker needs.
@@ -72,6 +115,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
 {
     srand((unsigned)GetTickCount());
 
+    // Install the localization stub before the plugin can look up any string.
+    WASABI_API_LNG = &g_langStub;
+
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
     // GetModuleFileNameW() find OUR exe and root the config/resource dirs here.
@@ -79,11 +125,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     if (!g_plugin.PluginInitialize())                { g_plugin.PluginQuit(); return 1; }
     g_bFullyExited = false;
 
-    // Silent waveform for M1b bring-up: 128 is the zero line in Winamp's 0..255
-    // sample space. (M1c replaces this with WASAPI loopback each frame.)
+    // M1b(2) bring-up: a synthetic animated waveform so reactive presets light
+    // up (proving window + D3D9 + shader + render end-to-end). This is generated
+    // in-process — it makes no sound. M1c replaces it with real WASAPI loopback.
+    // Winamp waveform format: unsigned char 0..255, 128 = zero line.
     unsigned char waveL[576], waveR[576];
-    memset(waveL, 128, sizeof(waveL));
-    memset(waveR, 128, sizeof(waveR));
+    double phase = 0.0;
 
     MSG msg;
     memset(&msg, 0, sizeof(msg));
@@ -97,6 +144,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
             DispatchMessage(&msg);
         }
         if (!running) break;
+
+        for (int i = 0; i < 576; i++)
+        {
+            double l = sin(phase + i * 0.10) * 95.0 + sin(phase * 0.5 + i * 0.021) * 28.0;
+            double r = sin(phase * 1.1 + i * 0.09) * 90.0 + sin(phase * 0.37 + i * 0.017) * 30.0;
+            int vl = 128 + (int)l, vr = 128 + (int)r;
+            waveL[i] = (unsigned char)(vl < 0 ? 0 : vl > 255 ? 255 : vl);
+            waveR[i] = (unsigned char)(vr < 0 ? 0 : vr > 255 ? 255 : vr);
+        }
+        phase += 0.18;
 
         // PluginRender() returns nonzero to keep going, zero to stop.
         if (!g_plugin.PluginRender(waveL, waveR)) running = false;
