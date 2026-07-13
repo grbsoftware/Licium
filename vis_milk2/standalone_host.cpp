@@ -81,6 +81,20 @@ public:
             if (retval) *(char **)retval = out;
             return 1;
         }
+        case API_LANGUAGE_LOADLMENU:
+        case API_LANGUAGE_LOADLMENUW:
+        {
+            // Load the menu straight from our own exe resources (plugin.rc),
+            // bypassing Winamp's localized loader. Without this, InitGDIStuff's
+            // menu load fails -> blank modal error dialog -> init aborts -> black.
+            // params: [0]=localized hinst, [1]=original hinst, [2]=resource id.
+            HINSTANCE hinst = (nparam >= 2) ? *(HINSTANCE *)params[1] : 0;
+            UINT id = (nparam >= 3) ? *(UINT *)params[2] : 0;
+            if (!hinst) hinst = GetModuleHandleW(0);
+            HMENU m = LoadMenuW(hinst, MAKEINTRESOURCEW(id));
+            if (retval) *(HMENU *)retval = m;
+            return m ? 1 : 0;
+        }
         default:
             return 0; // let _call fall back to its default value (0/NULL)
         }
@@ -115,8 +129,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
 {
     srand((unsigned)GetTickCount());
 
-    // Install the localization stub before the plugin can look up any string.
+    // Install the localization stub before the plugin can look up any string,
+    // and point resource-loading HINSTANCEs at our own exe module (its menu,
+    // dialogs and string table are compiled in from plugin.rc).
     WASABI_API_LNG = &g_langStub;
+    WASABI_API_ORIG_HINST = hInstance;
+    WASABI_API_LNG_HINST  = hInstance;
 
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
