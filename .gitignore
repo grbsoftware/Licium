@@ -1,0 +1,13 @@
+# build junk
+Release/
+Debug/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.tlog
+*.lastbuildstate
+*.log
+*.dll
+*.exe
+.vs/
