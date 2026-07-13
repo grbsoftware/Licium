@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #include "vis.h"
 #include "plugin.h"
 #include "defines.h"
@@ -102,6 +103,41 @@ public:
 };
 static HostLanguageStub g_langStub;
 
+// ---- Modal-dialog suppressor ------------------------------------------------
+// A standalone/headless host must never block on a modal error MessageBox (they
+// hijack the screen and stall the render loop). This watchdog thread finds any
+// standard dialog ("#32770" = MessageBox/DialogBox) owned by our process and
+// closes it, logging that one appeared so failures are still visible.
+static volatile bool g_watchdogRun = true;
+
+static BOOL CALLBACK DismissDlgProc(HWND h, LPARAM)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == GetCurrentProcessId() && IsWindowVisible(h))
+    {
+        wchar_t cls[64] = { 0 };
+        GetClassNameW(h, cls, 63);
+        if (wcscmp(cls, L"#32770") == 0)
+        {
+            FILE *lf = fopen("host_dialogs.log", "a");
+            if (lf) { fprintf(lf, "auto-dismissed a modal dialog (hwnd=%p)\n", (void *)h); fclose(lf); }
+            PostMessageW(h, WM_CLOSE, 0, 0);
+        }
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI DialogWatchdog(LPVOID)
+{
+    while (g_watchdogRun)
+    {
+        EnumWindows(DismissDlgProc, 0);
+        Sleep(80);
+    }
+    return 0;
+}
+
 // The engine references the Winamp module descriptor (normally in vis.cpp). In
 // standalone we never dispatch through it — we call PluginRender() directly — so
 // a zeroed instance with null entry-point pointers is all the linker needs.
@@ -135,6 +171,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     WASABI_API_LNG = &g_langStub;
     WASABI_API_ORIG_HINST = hInstance;
     WASABI_API_LNG_HINST  = hInstance;
+
+    // Start the modal-dialog suppressor so init error boxes can't hijack the
+    // screen or stall startup.
+    CreateThread(0, 0, DialogWatchdog, 0, 0, 0);
 
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
