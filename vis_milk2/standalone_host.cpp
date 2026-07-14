@@ -25,6 +25,7 @@
 #include "defines.h"
 #include "utility.h"
 #include "host_bridge.h"
+#include "wasapi_audio.h"
 
 #pragma comment(lib, "comdlg32.lib")
 
@@ -306,10 +307,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     // dialogs so the menu's Open/About boxes work as real user interactions.
     g_suppressDialogs = false;
 
-    // M1b(2) bring-up: a synthetic animated waveform so reactive presets light
-    // up (proving window + D3D9 + shader + render end-to-end). This is generated
-    // in-process — it makes no sound. M1c replaces it with real WASAPI loopback.
-    // Winamp waveform format: unsigned char 0..255, 128 = zero line.
+    // M1c: real audio. Tap the default output device via WASAPI loopback so the
+    // visuals react to whatever the machine is actually playing. If it fails to
+    // start (no audio device, permissions), fall back to the M1b synthetic
+    // waveform so the window still animates instead of going flat.
+    bool realAudio = WasapiAudioStart() != 0;
+
+    // Winamp waveform format: unsigned char 0..255, 128 = zero line. The
+    // synthetic generator below is the fallback path only.
     unsigned char waveL[576], waveR[576];
     double phase = 0.0;
 
@@ -326,20 +331,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
         }
         if (!running) break;
 
-        for (int i = 0; i < 576; i++)
+        // Prefer real WASAPI loopback. When it isn't running (start failed), or
+        // hasn't delivered a first packet yet, fall back to the synthetic scope
+        // so the window keeps animating.
+        if (!realAudio || !WasapiAudioGetWaveform(waveL, waveR))
         {
-            double l = sin(phase + i * 0.10) * 95.0 + sin(phase * 0.5 + i * 0.021) * 28.0;
-            double r = sin(phase * 1.1 + i * 0.09) * 90.0 + sin(phase * 0.37 + i * 0.017) * 30.0;
-            int vl = 128 + (int)l, vr = 128 + (int)r;
-            waveL[i] = (unsigned char)(vl < 0 ? 0 : vl > 255 ? 255 : vl);
-            waveR[i] = (unsigned char)(vr < 0 ? 0 : vr > 255 ? 255 : vr);
+            for (int i = 0; i < 576; i++)
+            {
+                double l = sin(phase + i * 0.10) * 95.0 + sin(phase * 0.5 + i * 0.021) * 28.0;
+                double r = sin(phase * 1.1 + i * 0.09) * 90.0 + sin(phase * 0.37 + i * 0.017) * 30.0;
+                int vl = 128 + (int)l, vr = 128 + (int)r;
+                waveL[i] = (unsigned char)(vl < 0 ? 0 : vl > 255 ? 255 : vl);
+                waveR[i] = (unsigned char)(vr < 0 ? 0 : vr > 255 ? 255 : vr);
+            }
+            phase += 0.18;
         }
-        phase += 0.18;
 
         // PluginRender() returns nonzero to keep going, zero to stop.
         if (!g_plugin.PluginRender(waveL, waveR)) running = false;
     }
 
+    WasapiAudioStop();
     g_plugin.PluginQuit();
     g_bFullyExited = true;
     return (int)msg.wParam;
