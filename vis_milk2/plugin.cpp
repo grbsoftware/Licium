@@ -498,6 +498,7 @@ Order of Function Calls
 #include "resource.h"
 #include "defines.h"
 #include "shell_defines.h"
+#include "host_bridge.h"   // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
 #include <process.h>  // for beginthread, etc.
@@ -5194,6 +5195,13 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
     switch (uMsg)
     {
     case WM_COMMAND:
+#ifdef MILKDROP_STANDALONE
+        // Give the standalone host's white-room menu first crack at this command.
+        // It handles only its own private-range ids and returns 0 for everything
+        // else, so the engine's own WM_COMMAND handling below is unaffected.
+        if (HostHandleMenuCommand(hWnd, LOWORD(wParam)))
+            return 0;
+#endif
         switch (LOWORD(wParam)) 
         {
         case ID_VIS_NEXT: 

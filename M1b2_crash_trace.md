@@ -190,4 +190,45 @@ Three states, and the menu bar is tied to mode:
 - [x] SP2: located — fault is in AllocateDX9Stuff, post-menu.
 - [x] SP3: root-cause area = NSEEL JIT generated-code breakpoint.
 - [x] SP4: FIXED via LinkIncremental=false; rebuilt; window renders (M1b2_window.png).
-- [ ] SP5: strip instrumentation, rebuild clean, commit M1b(2). Investigate per-frame caught AV.
+- [x] SP5: instrumentation stripped, clean rebuild, committed M1b(2) baseline (9f0b3ca).
+- [ ] SP6 (deferred): investigate the per-frame caught AV (KERNELBASE +0x108AC7).
+
+## MENU BAR — DONE (this session)
+Built the white-room top menu bar for the standalone host. Verified: window shows
+title bar + frame + bar **File · Effects · Sprites · Playlist · Audio · Options ·
+Help** (M1b2_menu.png); WM_COMMAND routing works end-to-end (View Docs toggled the
+F1 help overlay, M1b2_help.png).
+
+Design (all standalone menu code gated behind `MILKDROP_STANDALONE`, defined only in
+milkdrop_standalone.vcxproj → the Winamp DLL build stays byte-for-byte pristine):
+- `host_bridge.h` + `standalone_host.cpp`: the menu is host-owned "equipment".
+  `HostBuildMenuBar()` builds it; `HostHandleMenuCommand()` handles our private-range
+  ids (0xE1xx, no collision with ID_VIS_* / resource.h). Actions use only public
+  engine methods + the hwnd. Live items: File>New (LoadRandomPreset), File>Open
+  (GetOpenFileName→LoadPreset), File>Exit, Audio>Auto(checked), Help>View Docs
+  (ToggleHelp), Help>About (placeholder MessageBox). Greyed placeholders: Effects,
+  Sprites, Options (deferred), Add-to-Favorites, Playlist>Stop, Audio device submenus.
+- `dxcontext.cpp`: attach the menu on windowed-window creation (keyed on
+  screenmode==WINDOWED, so mode switches add/remove it automatically); two
+  AdjustWindowRect calls made menu-aware so the client == D3D backbuffer.
+- `plugin.cpp` MyWindowProc WM_COMMAND: one gated line forwards to the host handler
+  first; unknown ids fall through to the engine unchanged.
+- Dialog watchdog now disarms after init (g_suppressDialogs=false) so menu-driven
+  Open/About boxes aren't auto-dismissed.
+
+### "No border" reconciled (Gary's observation) — root cause + fix
+Classic MD2's WndProc returns 0 for **WM_NCCALCSIZE in every mode**, collapsing the
+client to fill the whole window — which is exactly why there was no visible frame AND
+why an attached menu bar had zero height. Fixed in pluginshell.cpp: in standalone
+WINDOWED mode, let the OS compute the normal non-client area (DefWindowProc);
+fullscreen/desktop (WS_POPUP) keep the collapse. Now client is a clean 512x512 with a
+real title bar + menu; nonclient height 59px.
+
+### OPEN for Gary
+- Top-level **Effects/Sprites/Options** are shown-but-greyed (kept for 3.33 visual
+  fidelity). If you'd rather omit them entirely until ported, say so.
+- Separate pre-existing bug (NOT menu-related): some presets fail shader compile with
+  `X3004: undeclared identifier 'sampler_buf1'` (from the multi-pass buffer work);
+  shows as the red error overlay. Track/fix separately.
+- M1c hooks left in place: Audio>Speakers/Microphones submenus + Playlist load are the
+  WASAPI-capture / preset-playlist tie-ins.

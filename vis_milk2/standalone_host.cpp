@@ -14,6 +14,7 @@
 
 #include "api.h"
 #include <windows.h>
+#include <commdlg.h>
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,9 @@
 #include "plugin.h"
 #include "defines.h"
 #include "utility.h"
+#include "host_bridge.h"
+
+#pragma comment(lib, "comdlg32.lib")
 
 // --- Globals the engine links against ---------------------------------------
 // Normally defined in vis.cpp (the Winamp entry), which the standalone EXE
@@ -105,16 +109,21 @@ static HostLanguageStub g_langStub;
 
 // ---- Modal-dialog suppressor ------------------------------------------------
 // A standalone/headless host must never block on a modal error MessageBox (they
-// hijack the screen and stall the render loop). This watchdog thread finds any
-// standard dialog ("#32770" = MessageBox/DialogBox) owned by our process and
-// closes it, logging that one appeared so failures are still visible.
-static volatile bool g_watchdogRun = true;
+// hijack the screen and stall the render loop) DURING INIT. This watchdog thread
+// finds any standard dialog ("#32770" = MessageBox/DialogBox) owned by our
+// process and closes it, logging that one appeared so failures are still visible.
+//
+// It is ARMED only until init completes: once the render loop is up, dialogs are
+// legitimate user actions (Open preset, About box, menu-driven) and must NOT be
+// auto-dismissed. g_suppressDialogs is cleared right after PluginInitialize.
+static volatile bool g_watchdogRun     = true;
+static volatile bool g_suppressDialogs = true;
 
 static BOOL CALLBACK DismissDlgProc(HWND h, LPARAM)
 {
     DWORD pid = 0;
     GetWindowThreadProcessId(h, &pid);
-    if (pid == GetCurrentProcessId() && IsWindowVisible(h))
+    if (g_suppressDialogs && pid == GetCurrentProcessId() && IsWindowVisible(h))
     {
         wchar_t cls[64] = { 0 };
         GetClassNameW(h, cls, 63);
@@ -136,6 +145,116 @@ static DWORD WINAPI DialogWatchdog(LPVOID)
         Sleep(80);
     }
     return 0;
+}
+
+// ---- White-room menu bar ----------------------------------------------------
+// Reconstructed from the observed MilkDrop 3.33 top menu bar ONLY (no MD3 source
+// was read). We own the equipment; drop-downs are populated only for features
+// this port actually implements, and unbuilt items are greyed as placeholders.
+//
+// Fresh command ids in a private range (0xE1xx) so they never collide with the
+// engine's Winamp-derived WM_COMMAND ids (ID_VIS_* ~40000) or plugin.rc ids
+// (<=~40010). The engine forwards WM_COMMAND to HostHandleMenuCommand first;
+// ids outside our range fall through to its own handlers unchanged.
+#define HM_FILE_NEW       0xE101
+#define HM_FILE_OPEN      0xE102
+#define HM_FILE_ADDFAV    0xE103
+#define HM_FILE_EXIT      0xE104
+#define HM_PLAYLIST_LOAD  0xE110
+#define HM_PLAYLIST_STOP  0xE111
+#define HM_AUDIO_AUTO     0xE120
+#define HM_HELP_DOCS      0xE130
+#define HM_HELP_ABOUT     0xE131
+
+extern "C" HMENU HostBuildMenuBar(void)
+{
+    HMENU bar = CreateMenu();
+
+    // File: New | Open | Add to Favorites (deferred) | Exit
+    HMENU file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING,            HM_FILE_NEW,    L"&New");
+    AppendMenuW(file, MF_STRING,            HM_FILE_OPEN,   L"&Open...");
+    AppendMenuW(file, MF_STRING | MF_GRAYED, HM_FILE_ADDFAV, L"Add to &Favorites");
+    AppendMenuW(file, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(file, MF_STRING,            HM_FILE_EXIT,   L"E&xit");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
+
+    // Effects / Sprites: intentionally not ported yet -> greyed placeholders.
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Effects");
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Sprites");
+
+    // Playlist: loads *preset* playlists (.milk lists). Stop greyed until one runs.
+    HMENU playlist = CreatePopupMenu();
+    AppendMenuW(playlist, MF_STRING,            HM_PLAYLIST_LOAD, L"&Load playlist...");
+    AppendMenuW(playlist, MF_STRING | MF_GRAYED, HM_PLAYLIST_STOP, L"&Stop playlist");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)playlist, L"&Playlist");
+
+    // Audio: Auto (default loopback, checked). Device pickers land in M1c (WASAPI).
+    HMENU audio = CreatePopupMenu();
+    AppendMenuW(audio, MF_STRING | MF_CHECKED, HM_AUDIO_AUTO, L"&Auto");
+    HMENU speakers = CreatePopupMenu();
+    AppendMenuW(audio, MF_POPUP | MF_GRAYED, (UINT_PTR)speakers, L"&Speakers");
+    HMENU mics = CreatePopupMenu();
+    AppendMenuW(audio, MF_POPUP | MF_GRAYED, (UINT_PTR)mics, L"&Microphones");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)audio, L"&Audio");
+
+    // Options: blocked on the aggregate preset-dials feature -> greyed for now.
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Options");
+
+    // Help (holds About, per Windows convention): View Docs surfaces the engine's
+    // built-in F1 help overlay.
+    HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, HM_HELP_DOCS, L"&View Docs");
+    AppendMenuW(help, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(help, MF_STRING, HM_HELP_ABOUT, L"&About MilkDrop...");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
+
+    return bar;
+}
+
+// File > Open: pick a .milk preset and load it with a short blend.
+static void HostOpenPresetDialog(HWND hwnd)
+{
+    wchar_t file[MAX_PATH] = L"";
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = hwnd;
+    ofn.lpstrFilter = L"MilkDrop presets (*.milk)\0*.milk\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile   = file;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrTitle  = L"Open preset";
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (GetOpenFileNameW(&ofn))
+        g_plugin.LoadPreset(file, 2.0f);
+}
+
+extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
+{
+    switch (cmd_id)
+    {
+    case HM_FILE_NEW:
+        g_plugin.LoadRandomPreset(2.0f);   // bring up a fresh visual
+        return 1;
+    case HM_FILE_OPEN:
+        HostOpenPresetDialog(hwnd);
+        return 1;
+    case HM_FILE_EXIT:
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 1;
+    case HM_HELP_DOCS:
+        g_plugin.ToggleHelp();             // engine's built-in F1 help overlay
+        return 1;
+    case HM_HELP_ABOUT:
+        MessageBoxW(hwnd,
+            L"MilkDrop 2 \x2014 clean-room standalone port\n\n"
+            L"Based on the BSD-licensed MilkDrop 2 (Nullsoft / Ryan Geiss).\n"
+            L"Runs headless \x2014 no Winamp required.",
+            L"About MilkDrop", MB_OK | MB_ICONINFORMATION);
+        return 1;
+    default:
+        return 0;   // not one of ours; let the engine handle it
+    }
 }
 
 // The engine references the Winamp module descriptor (normally in vis.cpp). In
@@ -182,6 +301,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     if (!g_plugin.PluginPreInitialize(0, hInstance)) { g_plugin.PluginQuit(); return 1; }
     if (!g_plugin.PluginInitialize())                { g_plugin.PluginQuit(); return 1; }
     g_bFullyExited = false;
+
+    // Init succeeded and the window/menu are up: stop auto-dismissing modal
+    // dialogs so the menu's Open/About boxes work as real user interactions.
+    g_suppressDialogs = false;
 
     // M1b(2) bring-up: a synthetic animated waveform so reactive presets light
     // up (proving window + D3D9 + shader + render end-to-end). This is generated

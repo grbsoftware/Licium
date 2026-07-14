@@ -2505,6 +2505,15 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 	switch (uMsg)
 	{
 	case WM_NCCALCSIZE:
+#ifdef MILKDROP_STANDALONE
+		// Standalone windowed mode wants a real title bar + menu bar, so let the
+		// OS compute the normal non-client area. Classic MD2 collapses the client
+		// to fill the whole window (returning 0) in every mode; that also hid the
+		// menu bar and left no visible frame. Fullscreen/fake-fullscreen/desktop
+		// (WS_POPUP, no menu) keep the collapse.
+		if (m_screenmode == WINDOWED)
+			return DefWindowProc(hWnd, uMsg, wParam, lParam);
+#endif
 		return 0;
 
 	case WM_USER:

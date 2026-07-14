@@ -32,6 +32,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "utility.h"
 #include "shell_defines.h"
 #include "resource.h"
+#include "host_bridge.h"   // standalone-only; no-op in the Winamp DLL build
 #define COMPILE_MULTIMON_STUBS 1
 #include <multimon.h>
 #include <strsafe.h>
@@ -729,6 +730,17 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 			return FALSE;
 		}
 
+#ifdef MILKDROP_STANDALONE
+		// Standalone host: attach the white-room top menu bar in windowed mode
+		// only (maximized is still WINDOWED). Fullscreen/fake-fullscreen/desktop
+		// use WS_POPUP and get no menu. Because Internal_Init recreates the window
+		// on every mode switch, this keys the menu to the mode automatically.
+		// (Attached before the sizing loop below, so the menu-aware AdjustWindowRect
+		// calls grow the frame and the D3D backbuffer still matches the client.)
+		if (m_current_mode.screenmode == WINDOWED)
+			SetMenu(m_hwnd, HostBuildMenuBar());
+#endif
+
 		SendMessage(m_hwnd_winamp, WM_WA_IPC, (WPARAM)m_hwnd, IPC_SETVISWND);
 
 		if (m_current_mode.m_skin)
@@ -856,6 +868,12 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 		}
 		else // WINDOWED
 		{
+			// Standalone windowed mode carries a menu bar; account for its height
+			// in the frame so the client area (== D3D backbuffer) stays as intended.
+			BOOL bHostMenu = FALSE;
+#ifdef MILKDROP_STANDALONE
+			bHostMenu = TRUE;
+#endif
 			RECT margin;
 			if (m_current_mode.m_skin)
 			{
@@ -871,7 +889,7 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 			{
 				RECT r1;
 				SetRect(&r1, 0, 0, 256, 256);
-				AdjustWindowRect(&r1, MY_WINDOW_STYLE, 0);
+				AdjustWindowRect(&r1, MY_WINDOW_STYLE, bHostMenu);
 				margin.left  = 0 - r1.left;
 				margin.right = r1.right - 256;
 				margin.top   = 0 - r1.top;
@@ -963,7 +981,7 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 				else
 				{
 					SetRect(&r, 0, 0, size, size);
-					AdjustWindowRect(&r, MY_WINDOW_STYLE, 0);
+					AdjustWindowRect(&r, MY_WINDOW_STYLE, bHostMenu);
 
 					m_window_width  = r.right - r.left;
 					m_window_height = r.bottom - r.top;
