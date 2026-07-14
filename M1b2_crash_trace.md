@@ -225,8 +225,10 @@ fullscreen/desktop (WS_POPUP) keep the collapse. Now client is a clean 512x512 w
 real title bar + menu; nonclient height 59px.
 
 ### OPEN for Gary
-- Top-level **Effects/Sprites/Options** are shown-but-greyed (kept for 3.33 visual
-  fidelity). If you'd rather omit them entirely until ported, say so.
+- Effects/Sprites REMOVED (Gary: 3.33-only, not porting; no placeholders — add new
+  categories later when the features exist). Bar is now File·Playlist·Audio·Options·Help.
+- **Options** kept as the one greyed item (it IS on our roadmap: per-preset dials +
+  save behavior). Remove it too by the same principle, or leave until built? (pending)
 - Separate pre-existing bug (NOT menu-related): some presets fail shader compile with
   `X3004: undeclared identifier 'sampler_buf1'` (from the multi-pass buffer work);
   shows as the red error overlay. Track/fix separately.

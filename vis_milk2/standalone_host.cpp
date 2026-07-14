@@ -179,9 +179,9 @@ extern "C" HMENU HostBuildMenuBar(void)
     AppendMenuW(file, MF_STRING,            HM_FILE_EXIT,   L"E&xit");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
 
-    // Effects / Sprites: intentionally not ported yet -> greyed placeholders.
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Effects");
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Sprites");
+    // (3.33 had Effects and Sprites here; we are not porting those features, so
+    // they are omitted rather than shown as dead placeholders. New categories can
+    // be added later when the features behind them exist.)
 
     // Playlist: loads *preset* playlists (.milk lists). Stop greyed until one runs.
     HMENU playlist = CreatePopupMenu();
