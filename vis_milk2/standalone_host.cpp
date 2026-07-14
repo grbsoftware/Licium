@@ -166,6 +166,12 @@ static DWORD WINAPI DialogWatchdog(LPVOID)
 #define HM_AUDIO_AUTO     0xE120
 #define HM_HELP_DOCS      0xE130
 #define HM_HELP_ABOUT     0xE131
+#define HM_AUDIO_SPK_BASE 0xE140   // Speakers (render/loopback) devices, +index
+#define HM_AUDIO_MIC_BASE 0xE160   // Microphones (capture) devices, +index
+
+// Command id of the currently-selected audio source (for the menu radio check).
+// Starts on Auto = default output, loopback (matches wasapi_audio's default).
+static int g_audioCurCmd = HM_AUDIO_AUTO;
 
 extern "C" HMENU HostBuildMenuBar(void)
 {
@@ -190,13 +196,29 @@ extern "C" HMENU HostBuildMenuBar(void)
     AppendMenuW(playlist, MF_STRING | MF_GRAYED, HM_PLAYLIST_STOP, L"&Stop playlist");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)playlist, L"&Playlist");
 
-    // Audio: Auto (default loopback, checked). Device pickers land in M1c (WASAPI).
+    // Audio: "Auto" = default system output via loopback (the checked default).
+    // Speakers = pick a specific render endpoint (still loopback); Microphones =
+    // capture a real input. Submenus are enumerated live; a radio check marks the
+    // active source (g_audioCurCmd). Empty kinds stay greyed.
     HMENU audio = CreatePopupMenu();
-    AppendMenuW(audio, MF_STRING | MF_CHECKED, HM_AUDIO_AUTO, L"&Auto");
+    AppendMenuW(audio, MF_STRING | (g_audioCurCmd == HM_AUDIO_AUTO ? MF_CHECKED : 0),
+                HM_AUDIO_AUTO, L"&Auto (system output)");
+
+    static wchar_t spkNames[WASAPI_MAX_DEVICES][WASAPI_NAME_LEN];
+    int nSpk = WasapiAudioListDevices(0, spkNames, WASAPI_MAX_DEVICES);
     HMENU speakers = CreatePopupMenu();
-    AppendMenuW(audio, MF_POPUP | MF_GRAYED, (UINT_PTR)speakers, L"&Speakers");
+    for (int i = 0; i < nSpk; i++)
+        AppendMenuW(speakers, MF_STRING | (g_audioCurCmd == HM_AUDIO_SPK_BASE + i ? MF_CHECKED : 0),
+                    HM_AUDIO_SPK_BASE + i, spkNames[i]);
+    AppendMenuW(audio, MF_POPUP | (nSpk ? 0 : MF_GRAYED), (UINT_PTR)speakers, L"&Speakers (loopback)");
+
+    static wchar_t micNames[WASAPI_MAX_DEVICES][WASAPI_NAME_LEN];
+    int nMic = WasapiAudioListDevices(1, micNames, WASAPI_MAX_DEVICES);
     HMENU mics = CreatePopupMenu();
-    AppendMenuW(audio, MF_POPUP | MF_GRAYED, (UINT_PTR)mics, L"&Microphones");
+    for (int i = 0; i < nMic; i++)
+        AppendMenuW(mics, MF_STRING | (g_audioCurCmd == HM_AUDIO_MIC_BASE + i ? MF_CHECKED : 0),
+                    HM_AUDIO_MIC_BASE + i, micNames[i]);
+    AppendMenuW(audio, MF_POPUP | (nMic ? 0 : MF_GRAYED), (UINT_PTR)mics, L"&Microphones");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)audio, L"&Audio");
 
     // Options: blocked on the aggregate preset-dials feature -> greyed for now.
@@ -232,6 +254,28 @@ static void HostOpenPresetDialog(HWND hwnd)
 
 extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
 {
+    // Audio source selection (Auto / a Speakers device / a Microphones device).
+    // Handled ahead of the switch because the device ids are a dynamic range.
+    if (cmd_id == HM_AUDIO_AUTO ||
+        (cmd_id >= HM_AUDIO_SPK_BASE && cmd_id < HM_AUDIO_SPK_BASE + WASAPI_MAX_DEVICES) ||
+        (cmd_id >= HM_AUDIO_MIC_BASE && cmd_id < HM_AUDIO_MIC_BASE + WASAPI_MAX_DEVICES))
+    {
+        int ok;
+        if (cmd_id == HM_AUDIO_AUTO)             ok = WasapiAudioSelect(0, -1);
+        else if (cmd_id >= HM_AUDIO_MIC_BASE)    ok = WasapiAudioSelect(1, cmd_id - HM_AUDIO_MIC_BASE);
+        else                                     ok = WasapiAudioSelect(0, cmd_id - HM_AUDIO_SPK_BASE);
+        if (ok)
+        {
+            // Move the radio check to the newly-selected item (MF_BYCOMMAND
+            // searches submenus recursively, so one call finds it anywhere).
+            HMENU bar = GetMenu(hwnd);
+            CheckMenuItem(bar, g_audioCurCmd, MF_BYCOMMAND | MF_UNCHECKED);
+            g_audioCurCmd = cmd_id;
+            CheckMenuItem(bar, g_audioCurCmd, MF_BYCOMMAND | MF_CHECKED);
+        }
+        return 1;
+    }
+
     switch (cmd_id)
     {
     case HM_FILE_NEW:

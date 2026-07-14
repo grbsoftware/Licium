@@ -17,8 +17,12 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <propsys.h>
+#include <initguid.h>                    // define the PKEY below in this TU
+#include <functiondiscoverykeys_devpkey.h> // PKEY_Device_FriendlyName
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 #include "wasapi_audio.h"
 
 #pragma comment(lib, "ole32.lib")
@@ -40,6 +44,19 @@ static int    g_writePos = 0;      // next write index (wraps)
 // Rolling peak amplitude for the once-a-second level log (diagnostics: proves
 // real audio is flowing vs. a silent endpoint). Written under g_lock.
 static float  g_peak = 0.0f;
+
+// --- Current capture target --------------------------------------------------
+// g_useDefault: true => default render endpoint (loopback), the "Auto" source.
+// Otherwise open g_targetId; loopback unless g_captureMode (a real mic input).
+static bool    g_useDefault  = true;
+static bool    g_captureMode = false;
+static wchar_t g_targetId[512] = { 0 };
+
+// Device-id caches, filled by WasapiAudioListDevices, read by WasapiAudioSelect.
+static wchar_t g_renderIds [WASAPI_MAX_DEVICES][512];
+static wchar_t g_captureIds[WASAPI_MAX_DEVICES][512];
+static int     g_renderCount  = 0;
+static int     g_captureCount = 0;
 
 static void RingReset(void)
 {
@@ -134,9 +151,19 @@ static DWORD WINAPI CaptureThread(LPVOID)
                           __uuidof(IMMDeviceEnumerator), (void **)&pEnum);
     if (FAILED(hr)) { AudioLog("CoCreateInstance(MMDeviceEnumerator) failed"); goto done; }
 
-    // Default RENDER endpoint (system output) -- loopback taps what it plays.
-    hr = pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDev);
-    if (FAILED(hr)) { AudioLog("GetDefaultAudioEndpoint(eRender) failed"); goto done; }
+    // Pick the endpoint: "Auto" = default render (loopback); otherwise the
+    // explicitly selected device (a specific speaker = still loopback, a mic =
+    // direct capture).
+    if (g_useDefault)
+    {
+        hr = pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDev);
+        if (FAILED(hr)) { AudioLog("GetDefaultAudioEndpoint(eRender) failed"); goto done; }
+    }
+    else
+    {
+        hr = pEnum->GetDevice(g_targetId, &pDev);
+        if (FAILED(hr)) { AudioLog("GetDevice(selected) failed"); goto done; }
+    }
 
     hr = pDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void **)&pClient);
     if (FAILED(hr)) { AudioLog("Activate(IAudioClient) failed"); goto done; }
@@ -144,11 +171,15 @@ static DWORD WINAPI CaptureThread(LPVOID)
     hr = pClient->GetMixFormat(&wfx);
     if (FAILED(hr) || !wfx) { AudioLog("GetMixFormat failed"); goto done; }
 
-    // Shared-mode loopback. 200ms buffer; poll-driven (no event handle -- loopback
-    // event mode is finicky, polling a shared buffer is robust and cheap).
-    hr = pClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-                             2000000 /*200ms in 100ns units*/, 0, wfx, NULL);
-    if (FAILED(hr)) { AudioLog("IAudioClient::Initialize(LOOPBACK) failed"); goto done; }
+    // Shared mode. Loopback flag for render endpoints (taps what plays); no flag
+    // for a real mic (direct capture). 200ms buffer, poll-driven (loopback event
+    // mode is finicky; polling a shared buffer is robust and cheap).
+    {
+        DWORD streamFlags = g_captureMode ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
+        hr = pClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags,
+                                 2000000 /*200ms in 100ns units*/, 0, wfx, NULL);
+    }
+    if (FAILED(hr)) { AudioLog("IAudioClient::Initialize failed"); goto done; }
 
     hr = pClient->GetService(__uuidof(IAudioCaptureClient), (void **)&pCap);
     if (FAILED(hr)) { AudioLog("GetService(IAudioCaptureClient) failed"); goto done; }
@@ -254,6 +285,89 @@ extern "C" int WasapiAudioGetWaveform(unsigned char *waveL, unsigned char *waveR
     }
     LeaveCriticalSection(&g_lock);
     return 1;
+}
+
+extern "C" int WasapiAudioListDevices(int isCapture, wchar_t names[][WASAPI_NAME_LEN], int maxN)
+{
+    // Own COM init on the UI thread; tolerate an already-initialized apartment.
+    HRESULT ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    bool doUninit = (ci == S_OK || ci == S_FALSE);
+
+    IMMDeviceEnumerator *pEnum = NULL;
+    IMMDeviceCollection *pColl = NULL;
+    int count = 0;
+
+    wchar_t (*idCache)[512] = isCapture ? g_captureIds : g_renderIds;
+
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), (void **)&pEnum);
+    if (FAILED(hr)) goto done;
+
+    hr = pEnum->EnumAudioEndpoints(isCapture ? eCapture : eRender,
+                                   DEVICE_STATE_ACTIVE, &pColl);
+    if (FAILED(hr) || !pColl) goto done;
+
+    UINT n = 0;
+    pColl->GetCount(&n);
+    for (UINT i = 0; i < n && count < maxN && count < WASAPI_MAX_DEVICES; i++)
+    {
+        IMMDevice *pDev = NULL;
+        if (FAILED(pColl->Item(i, &pDev)) || !pDev) continue;
+
+        LPWSTR id = NULL;
+        if (SUCCEEDED(pDev->GetId(&id)) && id)
+        {
+            wcsncpy_s(idCache[count], 512, id, _TRUNCATE);
+            CoTaskMemFree(id);
+
+            // Friendly name via the device property store.
+            names[count][0] = 0;
+            IPropertyStore *pProps = NULL;
+            if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps)
+            {
+                PROPVARIANT pv; PropVariantInit(&pv);
+                if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &pv)) &&
+                    pv.vt == VT_LPWSTR && pv.pwszVal)
+                    wcsncpy_s(names[count], WASAPI_NAME_LEN, pv.pwszVal, _TRUNCATE);
+                PropVariantClear(&pv);
+                pProps->Release();
+            }
+            if (names[count][0] == 0)
+                swprintf_s(names[count], WASAPI_NAME_LEN, L"Device %d", count + 1);
+            count++;
+        }
+        pDev->Release();
+    }
+
+done:
+    if (pColl) pColl->Release();
+    if (pEnum) pEnum->Release();
+    if (isCapture) g_captureCount = count; else g_renderCount = count;
+    if (doUninit) CoUninitialize();
+    return count;
+}
+
+extern "C" int WasapiAudioSelect(int isCapture, int index)
+{
+    WasapiAudioStop();
+
+    if (index < 0)
+    {
+        // "Auto": default render endpoint, loopback.
+        g_useDefault  = true;
+        g_captureMode = false;
+        g_targetId[0] = 0;
+    }
+    else
+    {
+        wchar_t (*idCache)[512] = isCapture ? g_captureIds : g_renderIds;
+        int cnt = isCapture ? g_captureCount : g_renderCount;
+        if (index >= cnt) { WasapiAudioStart(); return 0; }  // stale index
+        g_useDefault  = false;
+        g_captureMode = (isCapture != 0);
+        wcsncpy_s(g_targetId, 512, idCache[index], _TRUNCATE);
+    }
+    return WasapiAudioStart();
 }
 
 #endif // MILKDROP_STANDALONE

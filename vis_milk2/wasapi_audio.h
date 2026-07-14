@@ -31,6 +31,24 @@ void WasapiAudioStop(void);
 // which case the buffers are left untouched).
 int  WasapiAudioGetWaveform(unsigned char *waveL, unsigned char *waveR);
 
+// --- Device selection (M1c UI: Audio > Speakers / Microphones pickers) -------
+
+#define WASAPI_MAX_DEVICES 16
+#define WASAPI_NAME_LEN    128
+
+// Enumerate active audio endpoints of one kind: isCapture=0 -> render endpoints
+// ("Speakers", captured via loopback); isCapture=1 -> capture endpoints
+// ("Microphones"). Fills `names` (wide friendly names) up to maxN and caches the
+// matching device ids internally so WasapiAudioSelect() can reopen them. Returns
+// the count found. Safe to call from the UI thread (does its own COM init).
+int  WasapiAudioListDevices(int isCapture, wchar_t names[][WASAPI_NAME_LEN], int maxN);
+
+// Switch the capture source and restart the thread. index < 0 selects the
+// DEFAULT render endpoint in loopback mode ("Auto"); otherwise selects the
+// (isCapture, index) endpoint from the most recent WasapiAudioListDevices call
+// of that kind. Returns 1 on success.
+int  WasapiAudioSelect(int isCapture, int index);
+
 #ifdef __cplusplus
 }
 #endif
