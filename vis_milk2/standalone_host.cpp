@@ -15,6 +15,7 @@
 #include "api.h"
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,7 @@
 #include "wasapi_audio.h"
 
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // --- Globals the engine links against ---------------------------------------
 // Normally defined in vis.cpp (the Winamp entry), which the standalone EXE
@@ -173,6 +175,10 @@ static DWORD WINAPI DialogWatchdog(LPVOID)
 // Starts on Auto = default output, loopback (matches wasapi_audio's default).
 static int g_audioCurCmd = HM_AUDIO_AUTO;
 
+// Whether a preset-folder playlist is running (auto-advance on). Controls the
+// enabled state of "Stop playlist" across menu rebuilds.
+static bool g_playlistActive = false;
+
 extern "C" HMENU HostBuildMenuBar(void)
 {
     HMENU bar = CreateMenu();
@@ -190,10 +196,13 @@ extern "C" HMENU HostBuildMenuBar(void)
     // they are omitted rather than shown as dead placeholders. New categories can
     // be added later when the features behind them exist.)
 
-    // Playlist: loads *preset* playlists (.milk lists). Stop greyed until one runs.
+    // Playlist: point the engine at a preset FOLDER and let its built-in
+    // navigation auto-advance through it. Stop freezes on the current preset;
+    // it's greyed until a playlist is running.
     HMENU playlist = CreatePopupMenu();
-    AppendMenuW(playlist, MF_STRING,            HM_PLAYLIST_LOAD, L"&Load playlist...");
-    AppendMenuW(playlist, MF_STRING | MF_GRAYED, HM_PLAYLIST_STOP, L"&Stop playlist");
+    AppendMenuW(playlist, MF_STRING,             HM_PLAYLIST_LOAD, L"&Load preset folder...");
+    AppendMenuW(playlist, MF_STRING | (g_playlistActive ? 0 : MF_GRAYED),
+                HM_PLAYLIST_STOP, L"&Stop (hold current)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)playlist, L"&Playlist");
 
     // Audio: "Auto" = default system output via loopback (the checked default).
@@ -252,6 +261,39 @@ static void HostOpenPresetDialog(HWND hwnd)
         g_plugin.LoadPreset(file, 2.0f);
 }
 
+// Playlist > Load preset folder: pick a folder of .milk presets, point the
+// engine's preset list at it, and start auto-advancing through it. MilkDrop's
+// "playlist" is really its preset directory plus timed navigation, so we reuse
+// the engine's own machinery rather than build a parallel one.
+static void HostLoadPlaylistDialog(HWND hwnd)
+{
+    wchar_t path[MAX_PATH] = L"";
+    BROWSEINFOW bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.hwndOwner = hwnd;
+    bi.lpszTitle = L"Choose a preset folder to play as a playlist";
+    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_EDITBOX;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+
+    if (SHGetPathFromIDListW(pidl, path) && path[0])
+    {
+        // Preset dir needs a trailing backslash for the engine's list scan.
+        size_t n = wcslen(path);
+        if (n && path[n - 1] != L'\\' && n + 1 < MAX_PATH) { path[n] = L'\\'; path[n + 1] = 0; }
+
+        wcsncpy_s(g_plugin.m_szPresetDir, MAX_PATH, path, _TRUNCATE);
+        g_plugin.UpdatePresetList();                    // rescan the new folder
+        if (g_plugin.m_fTimeBetweenPresets < 1.0f)
+            g_plugin.m_fTimeBetweenPresets = 15.0f;     // ensure it actually advances
+        g_plugin.m_bPresetLockedByUser = false;         // enable auto-advance
+        g_plugin.LoadRandomPreset(2.0f);                // jump into the folder
+        g_playlistActive = true;
+        EnableMenuItem(GetMenu(hwnd), HM_PLAYLIST_STOP, MF_BYCOMMAND | MF_ENABLED);
+    }
+    CoTaskMemFree(pidl);
+}
+
 extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
 {
     // Audio source selection (Auto / a Speakers device / a Microphones device).
@@ -286,6 +328,14 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         return 1;
     case HM_FILE_EXIT:
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 1;
+    case HM_PLAYLIST_LOAD:
+        HostLoadPlaylistDialog(hwnd);
+        return 1;
+    case HM_PLAYLIST_STOP:
+        g_plugin.m_bPresetLockedByUser = true;   // hold the current preset
+        g_playlistActive = false;
+        EnableMenuItem(GetMenu(hwnd), HM_PLAYLIST_STOP, MF_BYCOMMAND | MF_GRAYED);
         return 1;
     case HM_HELP_DOCS:
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay
