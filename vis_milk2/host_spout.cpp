@@ -50,9 +50,12 @@ void HostSpoutInit(void)
     if (!g_spout.OpenDirectX9(GetDesktopWindow())) { g_failed = true; HostSpLog("OpenDirectX9 failed"); return; }
     g_spDev = g_spout.GetDX9device();
     if (!g_spDev)                { g_failed = true; HostSpLog("GetDX9device null"); return; }
-    g_spout.SetSenderName("MilkDrop");
+    // Distinct name: the old MilkDrop3.exe already senders as "MilkDrop", and two
+    // senders sharing a name is ambiguous for a receiver. "MilkDrop2" (this MD2
+    // engine port) never collides. Grab with: spout_grab.exe --sender MilkDrop2
+    g_spout.SetSenderName("MilkDrop2");
     g_init = true;
-    HostSpLog("Spout sender 'MilkDrop' ready");
+    HostSpLog("Spout sender 'MilkDrop2' ready");
 }
 
 static void ReleaseSurfaces(void)
