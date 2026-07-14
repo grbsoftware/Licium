@@ -42,6 +42,13 @@
     <ReferencePath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">..\DirectX\Lib;$(ReferencePath)</ReferencePath>
     <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">..\DirectX\Include;..\Wasabi;$(IncludePath)</IncludePath>
     <ReferencePath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">..\DirectX\Lib;$(ReferencePath)</ReferencePath>
+    <!-- Incremental linking routes function addresses through E9 jmp thunks. ns-eel2's
+         GLUE_realAddress (nseel-compiler.c) only unwraps those thunks under _DEBUG, so a
+         Release build with incremental linking mis-measures every JIT asm stub -> corrupt
+         generated code -> int3 (STATUS_BREAKPOINT) on first EEL execute. Match the engine
+         build: disable incremental linking in both configs. -->
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkIncremental>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Midl>
