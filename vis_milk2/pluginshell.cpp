@@ -146,6 +146,9 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "../nu/AutoCharFn.h"
 #include <mmsystem.h>
 #include <WindowsX.h>
+#ifdef MILKDROP_STANDALONE
+#include "host_spout.h"   // publish frames to a Spout sender (standalone only)
+#endif
 #pragma comment(lib,"winmm.lib")    // for timeGetTime
 
 // STATE VALUES & VERTEX FORMATS FOR HELP SCREEN TEXTURE:
@@ -1757,6 +1760,12 @@ void CPluginShell::DrawAndDisplay(int redraw)
 		if (!IsWindowVisible(GetPluginWindow()))
 			ShowWindow(GetPluginWindow(), SW_SHOWNORMAL);
 	}
+
+#ifdef MILKDROP_STANDALONE
+	// Publish the finished frame to Spout before Present. The swap effect is
+	// DISCARD, so the backbuffer only holds this frame up until Present.
+	HostSpoutSendFrame(m_lpDX->m_lpDevice);
+#endif
 
 	if (m_screenmode == WINDOWED && (m_lpDX->m_client_width != m_lpDX->m_REAL_client_width || m_lpDX->m_client_height != m_lpDX->m_REAL_client_height))
 	{

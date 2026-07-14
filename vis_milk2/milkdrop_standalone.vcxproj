@@ -178,6 +178,15 @@
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <ClCompile Include="host_spout.cpp">
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="spout\SpoutDX9.cpp" />
+    <ClCompile Include="spout\SpoutSenderNames.cpp" />
+    <ClCompile Include="spout\SpoutFrameCount.cpp" />
+    <ClCompile Include="spout\SpoutSharedMemory.cpp" />
+    <ClCompile Include="spout\SpoutUtils.cpp" />
     <ClCompile Include="..\ns-eel2\nseel-caltab.c" />
     <ClCompile Include="..\ns-eel2\nseel-cfunc.c" />
     <ClCompile Include="..\ns-eel2\nseel-compiler.c" />
@@ -194,6 +203,7 @@
   <ItemGroup>
     <ClInclude Include="api.h" />
     <ClInclude Include="wasapi_audio.h" />
+    <ClInclude Include="host_spout.h" />
     <ClInclude Include="defines.h" />
     <ClInclude Include="md_defines.h" />
     <ClInclude Include="menu.h" />

@@ -27,6 +27,7 @@
 #include "utility.h"
 #include "host_bridge.h"
 #include "wasapi_audio.h"
+#include "host_spout.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -407,6 +408,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     // waveform so the window still animates instead of going flat.
     bool realAudio = WasapiAudioStart() != 0;
 
+    // M1d: start the Spout sender so a headless receiver (spout_grab) can grab
+    // the real render. The engine calls HostSpoutSendFrame() each frame.
+    HostSpoutInit();
+
     // Winamp waveform format: unsigned char 0..255, 128 = zero line. The
     // synthetic generator below is the fallback path only.
     unsigned char waveL[576], waveR[576];
@@ -446,6 +451,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     }
 
     WasapiAudioStop();
+    HostSpoutShutdown();
     g_plugin.PluginQuit();
     g_bFullyExited = true;
     return (int)msg.wParam;
