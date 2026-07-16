@@ -45,7 +45,8 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 extern "C" int (*warand)(void);
 
-typedef enum { TEX_DISK, TEX_VS, TEX_BLUR0, TEX_BLUR1, TEX_BLUR2, TEX_BLUR3, TEX_BLUR4, TEX_BLUR5, TEX_BLUR6, TEX_BLUR_LAST } tex_code;
+typedef enum { TEX_DISK, TEX_VS, TEX_BLUR0, TEX_BLUR1, TEX_BLUR2, TEX_BLUR3, TEX_BLUR4, TEX_BLUR5, TEX_BLUR6, TEX_BLUR_LAST,
+               TEX_BUF0, TEX_BUF1, TEX_BUF2, TEX_BUF3 } tex_code;   // TEX_BUF* appended AFTER TEX_BLUR_LAST so the blur-range tests stay intact
 typedef enum { UI_REGULAR, UI_MENU, UI_LOAD, UI_LOAD_DEL, UI_LOAD_RENAME, UI_SAVEAS, UI_SAVE_OVERWRITE, UI_EDIT_MENU_STRING, UI_CHANGEDIR, UI_IMPORT_WAVE, UI_EXPORT_WAVE, UI_IMPORT_SHAPE, UI_EXPORT_SHAPE, UI_UPGRADE_PIXEL_SHADER, UI_MASHUP } ui_mode;
 typedef struct { float rad; float ang; float a; float c;  } td_vertinfo; // blending: mix = max(0,min(1,a*t + c));
 typedef char* CHARPTR;
@@ -544,6 +545,20 @@ public:
         int               m_nBlurTexH[NUM_BLUR_TEX];
         #endif
         int m_nHighestBlurTexUsedThisFrame;
+
+        // Licium multi-pass buffers: 4 generic ping-pong buffer pairs, exposed
+        // to preset shaders as sampler_buf0..3 (+ texsize_buf0..3, via the
+        // m_textures registration). buf0/1 are full-res (m_nTexSize), buf2/3
+        // are 1/8-res. Passes run before the warp blit; a pass reads its own
+        // previous contents (feedback-as-memory) plus anything else it samples.
+        IDirect3DTexture9 *m_lpPassBuf[NUM_PASS_BUFS][2];    // [buffer][ping-pong side]
+        int               m_nPassBufW[NUM_PASS_BUFS];
+        int               m_nPassBufH[NUM_PASS_BUFS];
+        int               m_nPassBufReadIdx[NUM_PASS_BUFS];  // side holding the newest content
+        PShaderInfo       m_bufShaders[NUM_PASS_BUFS];       // compiled per-preset by RecompileBufferShaders()
+        bool              m_bPassBufClearPending;            // set on preset apply -> buffers cleared at next RunBufferPasses
+        IDirect3DTexture9* GetPassBufRead(int n) { return m_lpPassBuf[n][m_nPassBufReadIdx[n]]; }
+
         IDirect3DTexture9 *m_lpDDSTitle;    // CAREFUL: MIGHT BE NULL (if not enough mem)!
         int               m_nTitleTexSizeX, m_nTitleTexSizeY;
         MYVERTEX          *m_verts;
@@ -663,6 +678,11 @@ public:
         void        DrawMotionVectors();
         
         bool        LoadShaders(PShaderSet* sh, CState* pState, bool bTick);
+        void        RecompileBufferShaders(CState* pState); // multi-pass buffers; call on EVERY preset apply (see impl. comment)
+        void        RunBufferPasses();                       // multi-pass buffers; runs before the warp blit
+        void        PassBuffers_Ensure();                    // (re)allocate the buffer textures if missing
+        void        PassBuffers_Release();                   // null the pointers (textures release via m_textures[])
+        void        PassBuffers_ReleaseOne(int n);           // alloc-failure path only
         void        UvToMathSpace(float u, float v, float* rad, float* ang);
         void        ApplyShaderParams(CShaderParams* p, LPD3DXCONSTANTTABLE pCT, CState* pState);
         void        RestoreShaderParams();

@@ -1089,6 +1089,15 @@ void CPlugin::MyPreInitialize()
         for (i=0; i<NUM_BLUR_TEX; i++)
             m_lpBlur[i] = NULL;
     #endif
+    for (i=0; i<NUM_PASS_BUFS; i++)
+    {
+        m_lpPassBuf[i][0]   = NULL;
+        m_lpPassBuf[i][1]   = NULL;
+        m_nPassBufW[i]      = 0;
+        m_nPassBufH[i]      = 0;
+        m_nPassBufReadIdx[i]= 0;
+    }
+    m_bPassBufClearPending  = true;
     m_lpDDSTitle			= NULL;
     m_nTitleTexSizeX        = 0;
     m_nTitleTexSizeY        = 0;
@@ -2022,6 +2031,11 @@ int CPlugin::AllocateMyDX9Stuff()
                 m_textures.push_back(x);
             }
         #endif
+
+        // multi-pass buffers: allocate now (not lazily) so that "buf0".."buf3"
+        // are already registered in m_textures[] when preset shaders get their
+        // params cached - that's what makes texsize_buf0..3 resolve.
+        PassBuffers_Ensure();
     }
 
 
@@ -2375,7 +2389,10 @@ int CPlugin::AllocateMyDX9Stuff()
         m_bInitialPresetSelected = true;
     }
     else
+    {
         LoadShaders(&m_shaders, m_pState, false);  // Also force-load the shaders - otherwise they'd only get compiled on a preset switch.
+        RecompileBufferShaders(m_pState);          // (device reset: m_bufShaders were Clear()ed in CleanUpMyDX9Stuff)
+    }
 
 	return true;
 }
@@ -3058,7 +3075,19 @@ void CShaderParams::CacheParams(LPD3DXCONSTANTTABLE pCT, bool bHardErrors)
                     }
                 }
             #endif
-            else 
+            else if (!wcsncmp(L"buf", szRootName, 3) &&
+                     szRootName[3] >= L'0' && szRootName[3] < L'0'+NUM_PASS_BUFS && !szRootName[4])
+            {
+                // multi-pass buffer: bound dynamically each frame (ping-pong)
+                // by ApplyShaderParams, like TEX_VS - texptr stays NULL here.
+                m_texture_bindings[ cd.RegisterIndex ].texptr = NULL;
+                m_texcode         [ cd.RegisterIndex ]        = (tex_code)(TEX_BUF0 + (szRootName[3] - L'0'));
+                if (!bWrapFilterSpecified) { // like blur: feedback buffers default to CLAMP
+                    m_texture_bindings[ cd.RegisterIndex ].bWrap = false;
+                    m_texture_bindings[ cd.RegisterIndex ].bBilinear = true;
+                }
+            }
+            else
             {
                 m_texcode[ cd.RegisterIndex ] = TEX_DISK;
 
@@ -3427,6 +3456,155 @@ bool CPlugin::LoadShaders(PShaderSet* sh, CState* pState, bool bTick)
 }
 
 //----------------------------------------------------------------------
+// Licium multi-pass buffers
+//----------------------------------------------------------------------
+
+void CPlugin::RecompileBufferShaders(CState* pState)
+{
+    // Buffer shaders are deliberately compiled OUTSIDE LoadShaders/PShaderSet:
+    // blended (soft-cut) loads compile into m_NewShaders and pointer-swap into
+    // place, and mash-ups recompile single slots - routing the buffers through
+    // those paths silently skips them (a new preset would render into the OLD
+    // preset's buffer shaders, or none at all). Instead this runs once for
+    // EVERY applied preset: hard cut and blend completion (both via
+    // OnFinishedLoadingPreset), mash-up / preset-version applies, and the
+    // device-reset shader reload.
+    if (m_nMaxPSVersion <= 0)
+        return;
+
+    for (int n=0; n<NUM_PASS_BUFS; n++)
+    {
+        m_bufShaders[n].Clear();    // buffer pass disabled unless the compile below succeeds
+        if (pState->m_szBufShadersText[n][0])
+            RecompilePShader(pState->m_szBufShadersText[n], &m_bufShaders[n], SHADER_COMP, false, pState->m_nCompPSVersion);
+    }
+
+    m_bPassBufClearPending = true;  // every applied preset starts from black buffers
+}
+
+void CPlugin::PassBuffers_Ensure()
+{
+    if (m_nMaxPSVersion <= 0)
+        return;
+    LPDIRECT3DDEVICE9 lpDevice = GetDevice();
+    if (!lpDevice)
+        return;
+
+    // same format as the main canvas (mirrors the blur-texture allocation)
+    D3DFORMAT fmt = D3DFMT_A8R8G8B8;
+    if (m_lpVS[0])
+    {
+        D3DSURFACE_DESC sd;
+        if (m_lpVS[0]->GetLevelDesc(0, &sd) == D3D_OK)
+            fmt = sd.Format;
+    }
+
+    for (int n=0; n<NUM_PASS_BUFS; n++)
+    {
+        if (m_lpPassBuf[n][0] && m_lpPassBuf[n][1])
+            continue;
+
+        // buf0/1 full-res; buf2/3 1/8-res (cheap, and quantized enough for
+        // glitch/pixel-art looks)
+        int w = m_nTexSizeX;
+        int h = m_nTexSizeY;
+        if (n >= 2)
+        {
+            w = max(16, w/8);
+            h = max(16, h/8);
+        }
+
+        bool bOK = true;
+        for (int side=0; side<2; side++)
+        {
+            if (m_lpPassBuf[n][side])
+                continue;
+            if (lpDevice->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, fmt, D3DPOOL_DEFAULT, &m_lpPassBuf[n][side], NULL) != D3D_OK &&
+                lpDevice->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, GetBackBufFormat(), D3DPOOL_DEFAULT, &m_lpPassBuf[n][side], NULL) != D3D_OK)
+            {
+                m_lpPassBuf[n][side] = NULL;
+                bOK = false;
+                break;
+            }
+
+            // start from black
+            IDirect3DSurface9* pSurf = NULL;
+            if (m_lpPassBuf[n][side]->GetSurfaceLevel(0, &pSurf) == D3D_OK)
+            {
+                lpDevice->ColorFill(pSurf, NULL, D3DCOLOR_ARGB(0,0,0,0));
+                pSurf->Release();
+            }
+
+            // register in m_textures[] - exactly like the blur textures - so
+            // (a) cleanup releases it (and OnTextureEvict fires), and
+            // (b) texsize_bufN resolves via the by-name lookup in CacheParams.
+            TexInfo x;
+            swprintf(x.texname, L"buf%d%s", n, side ? L"doNOTuseME" : L"");
+            x.texptr        = m_lpPassBuf[n][side];
+            x.w             = w;
+            x.h             = h;
+            x.d             = 1;
+            x.bEvictable    = false;
+            x.nAge          = m_nPresetsLoadedTotal;
+            x.nSizeInBytes  = 0;
+            m_textures.push_back(x);
+        }
+
+        if (!bOK)
+        {
+            // out of vidmem, most likely: run without this buffer. (Its sampler
+            // binds NULL -> shaders referencing it just see black.)
+            PassBuffers_ReleaseOne(n);
+            continue;
+        }
+
+        m_nPassBufW[n] = w;
+        m_nPassBufH[n] = h;
+        m_nPassBufReadIdx[n] = 0;
+    }
+}
+
+void CPlugin::PassBuffers_ReleaseOne(int n)
+{
+    // release directly ONLY for a half-allocated pair (alloc failure path);
+    // anything registered in m_textures[] must not be double-released here.
+    for (int side=0; side<2; side++)
+    {
+        if (m_lpPassBuf[n][side])
+        {
+            bool bInTexList = false;
+            for (size_t i=0; i<m_textures.size(); i++)
+                if (m_textures[i].texptr == m_lpPassBuf[n][side])
+                {
+                    bInTexList = true;
+                    break;
+                }
+            if (!bInTexList)
+                SafeRelease(m_lpPassBuf[n][side]);
+            m_lpPassBuf[n][side] = NULL;
+        }
+    }
+    m_nPassBufW[n] = 0;
+    m_nPassBufH[n] = 0;
+    m_nPassBufReadIdx[n] = 0;
+}
+
+void CPlugin::PassBuffers_Release()
+{
+    // called from CleanUpMyDX9Stuff AFTER the m_textures[] sweep has already
+    // released the actual textures (same pattern as m_lpBlur) - just null out
+    // our pointers and sizes.
+    for (int n=0; n<NUM_PASS_BUFS; n++)
+    {
+        m_lpPassBuf[n][0] = NULL;
+        m_lpPassBuf[n][1] = NULL;
+        m_nPassBufW[n] = 0;
+        m_nPassBufH[n] = 0;
+        m_nPassBufReadIdx[n] = 0;
+    }
+}
+
+//----------------------------------------------------------------------
 
 /*
 bool CPlugin::LoadShaderFromFile( char* szFile, char* szFn, char* szProfile, 
@@ -3783,6 +3961,9 @@ void CPlugin::CleanUpMyDX9Stuff(int final_cleanup)
             m_lpBlur[i] = NULL;//SafeRelease(m_lpBlur[i]);
     #endif
 
+    // ditto for the multi-pass buffers (they're in m_textures[] too)
+    PassBuffers_Release();
+
     // NOTE: not necessary; shell does this for us.
     /*if (GetDevice())
     {
@@ -3800,6 +3981,8 @@ void CPlugin::CleanUpMyDX9Stuff(int final_cleanup)
     m_OldShaders.warp.Clear();
     m_NewShaders.comp.Clear();
     m_NewShaders.warp.Clear();
+    for (i=0; i<NUM_PASS_BUFS; i++)
+        m_bufShaders[i].Clear();
     m_fallbackShaders_vs.comp.Clear();
     m_fallbackShaders_ps.comp.Clear();
     m_fallbackShaders_vs.warp.Clear();
@@ -4795,7 +4978,9 @@ void CPlugin::MyRenderUI(
                         if (ApplyFlags & STATE_COMP)
                             SafeRelease( m_shaders.comp.ptr );
                         LoadShaders(&m_shaders, m_pState, false);
-                        
+                        if (ApplyFlags & STATE_COMP)
+                            RecompileBufferShaders(m_pState);   // buffers ride with the comp slot
+
                         SetMenusForPresetVersion( m_pState->m_nWarpPSVersion, m_pState->m_nCompPSVersion );
                     }
                 }
@@ -5459,6 +5644,7 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
                 m_pState->m_nMaxPSVersion = max(m_pState->m_nWarpPSVersion, m_pState->m_nCompPSVersion);
 
                 LoadShaders(&m_shaders, m_pState, false);
+                RecompileBufferShaders(m_pState);   // comp PS version may have changed
                 SetMenusForPresetVersion( m_pState->m_nWarpPSVersion, m_pState->m_nCompPSVersion );
 			}
             if (wParam != 13)
@@ -8102,6 +8288,11 @@ void CPlugin::LoadPreset(const wchar_t *szPresetFilename, float fBlendTime)
 void CPlugin::OnFinishedLoadingPreset()
 {
     // note: only used this if you loaded the preset *intact* (or mostly intact)
+
+    // multi-pass buffers: recompile here, NOT in LoadShaders - this is the one
+    // hook both the hard-cut path and the blend path (LoadPresetTick stage 8,
+    // after the m_NewShaders pointer swap) go through.
+    RecompileBufferShaders(m_pState);
 
     SetMenusForPresetVersion( m_pState->m_nWarpPSVersion, m_pState->m_nCompPSVersion );
     m_nPresetsLoadedTotal++; //only increment this on COMPLETION of the load.

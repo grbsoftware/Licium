@@ -220,6 +220,15 @@ CState::CState()
 {
 	//Default();
 
+    // multi-pass buffers: zero here as well as in Default(), so a state that is
+    // Import()ed with partial ApplyFlags before ever being Default()ed can't
+    // carry garbage into the buffer-shader compile.
+    for (int b=0; b<NUM_PASS_BUFS; b++)
+    {
+        m_szBufShadersText[b][0] = 0;
+        m_nBufIters[b] = 1;
+    }
+
 	// this is the list of variables that can be used for a PER-FRAME calculation;
 	// it is a SUBSET of the per-vertex calculation variable list.
 	m_pf_codehandle = NULL;
@@ -694,7 +703,14 @@ void CState::Default(DWORD ApplyFlags)
     if (ApplyFlags & STATE_COMP)
     {
         m_szCompShadersText[0] = 0;
-        m_nCompPSVersion   = 0;     
+        m_nCompPSVersion   = 0;
+
+        // multi-pass buffers ride with the comp shader
+        for (int b=0; b<NUM_PASS_BUFS; b++)
+        {
+            m_szBufShadersText[b][0] = 0;
+            m_nBufIters[b] = 1;
+        }
     }
 
     RandomizePresetVars();
@@ -982,6 +998,17 @@ bool CState::Export(const wchar_t *szIniFile)
         WriteCode(fOut, i, m_szWarpShadersText, "warp_", true);
     if (m_nCompPSVersion >= MD2_PS_2_0)
         WriteCode(fOut, i, m_szCompShadersText, "comp_", true);
+
+    // multi-pass buffers
+    for (int b=0; b<NUM_PASS_BUFS; b++)
+        if (m_szBufShadersText[b][0])
+        {
+            char bufprefix[32];
+            if (m_nBufIters[b] != 1)
+                fprintf(fOut, "buf%d_iterations=%d\n", b, m_nBufIters[b]);
+            sprintf(bufprefix, "buf%d_", b);
+            WriteCode(fOut, i, m_szBufShadersText[b], bufprefix, true);
+        }
 
 	fclose(fOut);
 
@@ -1437,13 +1464,26 @@ bool CState::Import(const wchar_t *szIniFile, float fTime, CState* pOldState, DW
     }
     
     // comp shader
-    if (ApplyFlags & STATE_COMP) 
+    if (ApplyFlags & STATE_COMP)
     {
         //m_szCompShadersText[0] = 0;
         ReadCode(f, m_szCompShadersText, "comp_");
         if (!m_szCompShadersText[0])
             g_plugin.GenCompPShaderText(m_szCompShadersText, m_fGammaAdj.eval(-1), m_fVideoEchoAlpha.eval(-1), m_fVideoEchoZoom.eval(-1), m_nVideoEchoOrientation, m_fShader.eval(-1), m_bBrighten, m_bDarken, m_bSolarize, m_bInvert);
         m_nCompPSVersion = nCompPSVersionInFile;
+
+        // multi-pass buffers: bufN_1=.. code lines (ReadCode zeroes the text if
+        // absent -> buffer disabled) + optional bufN_iterations=.. (default 1).
+        // Note "bufN_iterations" is never consumed by ReadCode, which only scans
+        // numbered lines ("bufN_1", "bufN_2", ...).
+        for (int b=0; b<NUM_PASS_BUFS; b++)
+        {
+            char bufprefix[32];
+            sprintf(bufprefix, "buf%d_", b);
+            ReadCode(f, m_szBufShadersText[b], bufprefix);
+            sprintf(bufprefix, "buf%d_iterations", b);
+            m_nBufIters[b] = GetFastInt(bufprefix, 1, f);
+        }
     }
 
     m_nMaxPSVersion = max(m_nWarpPSVersion, m_nCompPSVersion);

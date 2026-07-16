@@ -376,6 +376,14 @@ public:
     char			m_szPerPixelExpr[MAX_BIGSTRING_LEN];
     char            m_szWarpShadersText[MAX_BIGSTRING_LEN]; // pixel shader code
     char            m_szCompShadersText[MAX_BIGSTRING_LEN]; // pixel shader code
+
+    // Licium multi-pass buffers: per-buffer pixel shader code + per-frame
+    // iteration count, parsed from bufN_1=.. / bufN_iterations=.. preset lines.
+    // A buffer pass is enabled iff its code is non-empty. buf0/1 render at
+    // full res, buf2/3 at 1/8 res. See CPlugin::RunBufferPasses().
+    #define NUM_PASS_BUFS 4
+    char            m_szBufShadersText[NUM_PASS_BUFS][MAX_BIGSTRING_LEN];
+    int             m_nBufIters[NUM_PASS_BUFS];
 	void			FreeVarsAndCode(bool bFree = true);
 	void			RegisterBuiltInVariables(int flags);
 	void			StripLinefeedCharsAndComments(char *src, char *dest);

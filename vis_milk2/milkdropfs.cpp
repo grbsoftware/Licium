@@ -1088,6 +1088,11 @@ void CPlugin::RenderFrame(int bRedraw)
 
     ComputeGridAlphaValues();
 
+    // Licium multi-pass buffers: run the per-preset buffer passes now, before
+    // the warp blit, so warp/comp (and later buffer passes) sample this frame's
+    // freshly-written sampler_buf0..3.
+    RunBufferPasses();
+
 	// do the warping for this frame [warp shader]
     if (!m_pState->m_bBlending) 
     {
@@ -1759,6 +1764,131 @@ void CPlugin::BlurPasses()
     #endif
 
     m_nHighestBlurTexUsedThisFrame = 0;
+}
+
+// Licium multi-pass buffers: run each enabled buffer's pixel shader into the
+// write side of its ping-pong pair, then flip, so everything downstream (the
+// warp shader, comp shader, and later buffer passes this same frame) samples
+// the freshly-written content via sampler_buf0..3. Because a pass can sample
+// its own buffer (the read side = its previous output), feedback-as-memory
+// comes for free. Runs BEFORE the warp blit; render target on entry is VS1,
+// which is captured and restored.
+void CPlugin::RunBufferPasses()
+{
+    if (m_nMaxPSVersion <= 0)
+        return;
+
+    int nActive = 0;
+    for (int n=0; n<NUM_PASS_BUFS; n++)
+        if (m_bufShaders[n].ptr)
+            nActive++;
+    if (nActive == 0 && !m_bPassBufClearPending)
+        return;
+
+    LPDIRECT3DDEVICE9 lpDevice = GetDevice();
+    if (!lpDevice)
+        return;
+
+    PassBuffers_Ensure();   // no-op when already allocated
+
+    // clear-on-preset-apply: don't let a new preset inherit the previous
+    // preset's decaying buffer contents.
+    if (m_bPassBufClearPending)
+    {
+        for (int n=0; n<NUM_PASS_BUFS; n++)
+        {
+            for (int side=0; side<2; side++)
+                if (m_lpPassBuf[n][side])
+                {
+                    IDirect3DSurface9* pSurf = NULL;
+                    if (m_lpPassBuf[n][side]->GetSurfaceLevel(0, &pSurf) == D3D_OK)
+                    {
+                        lpDevice->ColorFill(pSurf, NULL, D3DCOLOR_ARGB(0,0,0,0));
+                        pSurf->Release();
+                    }
+                }
+            m_nPassBufReadIdx[n] = 0;
+        }
+        m_bPassBufClearPending = false;
+    }
+
+    if (nActive == 0)
+        return;
+
+    LPDIRECT3DSURFACE9 pOldTarget = NULL;
+    lpDevice->GetRenderTarget(0, &pOldTarget);
+
+    // draw setup mirrors the comp-shader blit (buffer shaders are compiled with
+    // the comp wrapper, so they pair with the comp vertex shader)
+    lpDevice->SetVertexDeclaration(m_pMyVertDecl);
+    lpDevice->SetVertexShader(m_fallbackShaders_vs.comp.ptr);
+    lpDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+
+    for (int n=0; n<NUM_PASS_BUFS; n++)
+    {
+        if (!m_bufShaders[n].ptr || !m_lpPassBuf[n][0] || !m_lpPassBuf[n][1])
+            continue;
+
+        // fullscreen quad in clip space; uv oriented like the comp grid (v=0 at
+        // the top), half-texel offset computed at THIS buffer's resolution.
+        float fHalfW = 0.5f / (float)m_nPassBufW[n];
+        float fHalfH = 0.5f / (float)m_nPassBufH[n];
+        MYVERTEX v[4];
+        ZeroMemory(v, sizeof(v));
+        for (int k=0; k<4; k++)
+        {
+            float u = (k & 1) ? 1.0f : 0.0f;
+            float vv = (k & 2) ? 1.0f : 0.0f;
+            v[k].x = (u - fHalfW)*2.0f - 1.0f;
+            v[k].y = -((vv - fHalfH)*2.0f - 1.0f);
+            v[k].z = 0;
+            v[k].Diffuse = 0xFFFFFFFF;
+            v[k].tu = u;        v[k].tv = vv;
+            v[k].tu_orig = u;   v[k].tv_orig = vv;
+            UvToMathSpace(u, vv, &v[k].rad, &v[k].ang);
+        }
+
+        int iters = m_pState->m_nBufIters[n];
+        if (iters < 1)  iters = 1;
+        if (iters > 64) iters = 64;   // sanity cap
+
+        lpDevice->SetPixelShader(m_bufShaders[n].ptr);
+
+        for (int iter=0; iter<iters; iter++)
+        {
+            int write = 1 - m_nPassBufReadIdx[n];
+            IDirect3DSurface9* pNewTarget = NULL;
+            if (m_lpPassBuf[n][write]->GetSurfaceLevel(0, &pNewTarget) != D3D_OK)
+                break;
+            lpDevice->SetRenderTarget(0, pNewTarget);   // viewport auto-resizes to the target
+            pNewTarget->Release();
+
+            // (re)bind params EACH iteration: sampler_bufN binds through
+            // GetPassBufRead(), so after each flip the shader reads the side it
+            // just wrote (intra-frame ping-pong, for solver-style passes).
+            ApplyShaderParams(&m_bufShaders[n].params, m_bufShaders[n].CT, m_pState);
+
+            // texsize (_c7) inside a buffer pass reports the buffer's OWN size,
+            // so uv-based neighbor taps work in the 1/8-res buffers too.
+            if (m_bufShaders[n].params.const_handles[7])
+                m_bufShaders[n].CT->SetVector(lpDevice, m_bufShaders[n].params.const_handles[7],
+                    &D3DXVECTOR4((float)m_nPassBufW[n], (float)m_nPassBufH[n],
+                                 1.0f/(float)m_nPassBufW[n], 1.0f/(float)m_nPassBufH[n]));
+
+            lpDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(MYVERTEX));
+
+            m_nPassBufReadIdx[n] = write;   // newest content becomes the read side
+        }
+    }
+
+    // restore state for the warp pass
+    lpDevice->SetRenderTarget(0, pOldTarget);
+    if (pOldTarget)
+        pOldTarget->Release();
+    lpDevice->SetPixelShader(NULL);
+    lpDevice->SetVertexShader(NULL);
+    for (int i=0; i<16; i++)
+        lpDevice->SetTexture(i, NULL);
 }
 
 void CPlugin::ComputeGridAlphaValues()
@@ -3911,11 +4041,15 @@ void CPlugin::ApplyShaderParams(CShaderParams* p, LPD3DXCONSTANTTABLE pCT, CStat
     {    
         if (p->m_texcode[i] == TEX_VS)
             lpDevice->SetTexture(i, m_lpVS[0]);
-        else 
+        else if (p->m_texcode[i] >= TEX_BUF0 && p->m_texcode[i] <= TEX_BUF3)
+            lpDevice->SetTexture(i, GetPassBufRead(p->m_texcode[i] - TEX_BUF0));   // dynamic: newest ping-pong side
+        else
             lpDevice->SetTexture(i, p->m_texture_bindings[i].texptr);
 
         // also set up sampler stage, if anything is bound here...
-        if (p->m_texcode[i]==TEX_VS || p->m_texture_bindings[i].texptr) 
+        if (p->m_texcode[i]==TEX_VS ||
+            (p->m_texcode[i]>=TEX_BUF0 && p->m_texcode[i]<=TEX_BUF3) ||
+            p->m_texture_bindings[i].texptr)
         {
             bool bAniso = false;  
             DWORD HQFilter = bAniso ? D3DTEXF_ANISOTROPIC : D3DTEXF_LINEAR;     
