@@ -2937,6 +2937,14 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 		// Prevent the user from selecting the menu in fullscreen mode
 		if (m_screenmode != WINDOWED)
 			return HTCLIENT;
+#ifdef MILKDROP_STANDALONE
+		// Standalone windowed mode has a REAL caption + menu bar. The custom
+		// hit-test below (written for Winamp's frameless embedded windows)
+		// reports HTCLIENT over both, which makes the menu bar unclickable
+		// with the mouse. Let Windows hit-test the real frame instead
+		// (menu, caption, borders, system buttons all behave normally).
+		return DefWindowProc(hWnd, uMsg, wParam, lParam);
+#else
 		else
 		{
 			int mouseX = GET_X_LPARAM(lParam);
@@ -2971,6 +2979,7 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 				return HTCLIENT;
 		}
 		break;
+#endif
 
 	case WM_SYSCOMMAND:
 		// Prevent *moving/sizing* and *entering standby mode* when in fullscreen mode
