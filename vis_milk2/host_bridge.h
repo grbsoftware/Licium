@@ -32,7 +32,10 @@ HMENU HostBuildMenuBar(void);
 // engine captions the window WINDOWCAPTION and uses the old plugin-icon class
 // icon) and, when windowed is nonzero, attaches the menu bar. Window recreation
 // on each mode switch re-runs this, so the identity survives mode changes.
-void HostOnWindowCreated(HWND hwnd, int windowed);
+// iniFile is the engine's resolved config path (milk2.ini) — the host stashes
+// it (plus the hwnd) for settings of its own, e.g. the maximized-restore flag;
+// the accessors CPluginShell exposes for these are protected.
+void HostOnWindowCreated(HWND hwnd, int windowed, const wchar_t *iniFile);
 
 // Handle a WM_COMMAND whose id is in the host-menu range. Returns 1 if the id
 // was ours (and was handled), 0 otherwise so the engine keeps processing it.

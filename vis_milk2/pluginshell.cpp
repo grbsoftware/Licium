@@ -838,6 +838,16 @@ void CPluginShell::OnUserResizeWindow()
 		// save the new window position:
 		if (wp.showCmd==SW_SHOWNORMAL)
 			m_lpDX->SaveWindow();
+#ifdef MILKDROP_STANDALONE
+		// A maximize must hit the ini too: the standalone-gated part of
+		// SaveWindow persists a bMainWndMaximized flag (and, while maximized,
+		// substitutes the RESTORED rect for the client rect) so the host can
+		// bring the window back maximized at the next launch. The pristine
+		// SW_SHOWNORMAL-only branch above never fires while maximized, so
+		// without this the flag could never be recorded as set.
+		else if (wp.showCmd==SW_SHOWMAXIMIZED)
+			m_lpDX->SaveWindow();
+#endif
 	}
 }
 

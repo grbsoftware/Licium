@@ -738,7 +738,7 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 		// keys the menu to the mode automatically. (Runs before the sizing loop
 		// below, so the menu-aware AdjustWindowRect calls grow the frame and the
 		// D3D backbuffer still matches the client.)
-		HostOnWindowCreated(m_hwnd, m_current_mode.screenmode == WINDOWED);
+		HostOnWindowCreated(m_hwnd, m_current_mode.screenmode == WINDOWED, m_szIniFile);
 #endif
 
 		SendMessage(m_hwnd_winamp, WM_WA_IPC, (WPARAM)m_hwnd, IPC_SETVISWND);
@@ -1328,6 +1328,47 @@ void DXContext::SaveWindow()
 		WritePrivateProfileIntW(c.left,  L"nMainWndLeft",   m_szIniFile, L"settings");
 		WritePrivateProfileIntW(c.right, L"nMainWndRight",  m_szIniFile, L"settings");
 		WritePrivateProfileIntW(c.bottom,L"nMainWndBottom", m_szIniFile, L"settings");
+
+#ifdef MILKDROP_STANDALONE
+		// Also persist the MAXIMIZED flag (the standalone host re-applies it at
+		// startup; the engine only ever saved the client rect, so a maximized
+		// session used to come back as a normal window). When maximized, the
+		// client rect grabbed above is the maximized one — overwrite it with
+		// the RESTORED placement so un-maximizing after a relaunch returns to
+		// the pre-maximize size.
+		if (m_hwnd)
+		{
+			WINDOWPLACEMENT wp;
+			wp.length = sizeof(wp);
+			if (GetWindowPlacement(m_hwnd, &wp))
+			{
+				int bMax = (wp.showCmd == SW_SHOWMAXIMIZED) ? 1 : 0;
+				WritePrivateProfileIntW(bMax, L"bMainWndMaximized", m_szIniFile, L"settings");
+				if (bMax)
+				{
+					// rcNormalPosition is a WINDOW rect in workspace coords;
+					// the ini wants a CLIENT rect in screen coords. Workspace ->
+					// screen: offset by the monitor's work-area origin. Window ->
+					// client: strip the same frame margins init adds back
+					// (AdjustWindowRect, menu-aware — standalone windowed mode
+					// always carries the menu bar).
+					RECT rn = wp.rcNormalPosition;
+					MONITORINFO mi;
+					mi.cbSize = sizeof(mi);
+					HMONITOR mon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+					if (GetMonitorInfo(mon, &mi))
+						OffsetRect(&rn, mi.rcWork.left, mi.rcWork.top);
+					RECT adj;
+					SetRect(&adj, 0, 0, 256, 256);
+					AdjustWindowRect(&adj, MY_WINDOW_STYLE, TRUE);
+					WritePrivateProfileIntW(rn.top    - adj.top,           L"nMainWndTop",    m_szIniFile, L"settings");
+					WritePrivateProfileIntW(rn.left   - adj.left,          L"nMainWndLeft",   m_szIniFile, L"settings");
+					WritePrivateProfileIntW(rn.right  - (adj.right - 256), L"nMainWndRight",  m_szIniFile, L"settings");
+					WritePrivateProfileIntW(rn.bottom - (adj.bottom - 256),L"nMainWndBottom", m_szIniFile, L"settings");
+				}
+			}
+		}
+#endif
 
 		// also save bounds for embedwnd
 		if (m_current_mode.m_skin && myWindowState.me)

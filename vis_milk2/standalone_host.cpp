@@ -29,6 +29,7 @@
 #include "wasapi_audio.h"
 #include "host_spout.h"
 #include "licium_res.h"
+#include "licium_version.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -55,6 +56,50 @@ HINSTANCE WASABI_API_LNG_HINST = 0, WASABI_API_ORIG_HINST = 0;
 // calls through a null pointer.
 static int host_rand_fn(void) { return (rand() ^ (rand() << 8)) & 0x7fffffff; }
 int (*warand)(void) = host_rand_fn;
+
+// ---- F1 help overlay ----------------------------------------------------------
+// The engine draws whatever g_szHelp points at (pluginshell.cpp, per frame); by
+// default that's its MilkDrop-era text resource, which documents keys we don't
+// ship and points at a milkdrop .html file. After init, WinMain repoints it at
+// this Licium text instead — only keys that actually work in the standalone
+// build (Winamp-remote keys like U-shuffle are omitted; custom-message and
+// sprite keys wait until those features are surfaced). THE AUTHORITATIVE KEY
+// MAP IS docs\HOTKEYS.md — update both together, and check that registry before
+// assigning any new tool hotkey (Bandit/Palettes/Latent).
+extern wchar_t* g_szHelp;
+extern int      g_szHelp_W;
+
+static const wchar_t LICIUM_HELP_TEXT[] =
+    L"LICIUM KEYS\n"
+    L"\n"
+    L"  F1           show / hide this help\n"
+    L"  Alt+Enter    toggle fullscreen\n"
+    L"  Esc          close help/menus; leave fullscreen\n"
+    L"  Scroll Lock  lock current preset (blocks auto-advance)\n"
+    L"\n"
+    L"PRESETS\n"
+    L"  Space        next preset (soft blend)\n"
+    L"  H            next preset (hard cut)\n"
+    L"  Backspace    previous preset\n"
+    L"  R            toggle random / sequential order\n"
+    L"  A            random preset with random warp+comp shaders\n"
+    L"  D            cycle shader locks (comp / warp / both / none)\n"
+    L"  ! / @        randomize warp / comp shader only\n"
+    L"  L            preset load menu       F8  change preset folder\n"
+    L"  M            engine settings menu\n"
+    L"  S            save preset as...      + / -  rate preset\n"
+    L"\n"
+    L"OVERLAYS\n"
+    L"  F2 title   F3 time   F4 preset info   F5 fps   F6 rating   N debug\n"
+    L"\n"
+    L"TWEAK THE CURRENT PRESET\n"
+    L"  i / I        zoom\n"
+    L"  W / w        waveform mode     E / e  wave brightness   J / j  wave size\n"
+    L"  O / o        warp amount       G / g  gamma   Q / q  echo zoom   F  echo flip\n"
+    L"  < >          rotation          [ ] { }  push x / y\n"
+    L"\n"
+    L"Audio source, playlists and tools live in the menu bar.\n"
+    L"Bandit / Palettes / Latent are coming milestones.";
 
 // Minimal stand-in for Winamp's localization service. The engine has ~280
 // WASABI_API_LNGSTRINGW(...) call sites (preset-name overlay, menus, error
@@ -152,95 +197,208 @@ static DWORD WINAPI DialogWatchdog(LPVOID)
     return 0;
 }
 
-// ---- Startup splash ----------------------------------------------------------
-// Holly Watson's Licium wordmark (embedded as PNG in licium.rc), shown in a
-// borderless topmost window centered on the primary monitor. Non-blocking: it
-// appears before engine init, floats over the opening visuals, then fades out.
-// The render loop drives the hold/fade timing via HostSplashTick(); nothing
-// waits on it, so audio and rendering start exactly as fast as without it.
+// ---- Splash / About panel ----------------------------------------------------
+// Photoshop-style splash: Holly Watson's wordmark (embedded PNG, licium.rc) on
+// the left, app info on the right (name, version, build date, credits) with a
+// Continue button. Shown at startup in a borderless topmost window, centered;
+// non-blocking (the engine inits and renders behind it), and it HOLDS until
+// dismissed — Continue click, any click on the panel, or Esc/Enter when it has
+// focus — then fades out. Help > About shows the same panel, so the version and
+// the credit lines (Holly Watson; Nullsoft/Geiss BSD; Spout) have one home.
+// Version text comes from licium_version.h, the same header licium.rc stamps
+// into the exe's VERSIONINFO — the two cannot drift apart.
 
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
 
-#define SPLASH_HOLD_MS 2200   // full opacity, from first paint
-#define SPLASH_FADE_MS 500
+#define SPLASH_FADE_MS 400
 
-static HWND    g_splashWnd     = 0;
-static HBITMAP g_splashBmp     = 0;
-static int     g_splashSize    = 0;   // window is square, like the artwork
-static DWORD   g_splashShownAt = 0;
+static HWND    g_splashWnd       = 0;
+static HBITMAP g_splashBmp       = 0;
+static int     g_splashW         = 0;
+static int     g_splashH         = 0;
+static DWORD   g_splashDismissAt = 0;   // nonzero = fading out since this tick
+
+static void HostSplashBeginDismiss(void)
+{
+    if (g_splashWnd && !g_splashDismissAt)
+        g_splashDismissAt = GetTickCount();
+}
 
 static LRESULT CALLBACK SplashWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-    if (m == WM_PAINT)
+    switch (m)
+    {
+    case WM_PAINT:
     {
         PAINTSTRUCT ps;
         HDC dc  = BeginPaint(h, &ps);
         HDC mem = CreateCompatibleDC(dc);
         HGDIOBJ old = SelectObject(mem, g_splashBmp);
-        BitBlt(dc, 0, 0, g_splashSize, g_splashSize, mem, 0, 0, SRCCOPY);
+        BitBlt(dc, 0, 0, g_splashW, g_splashH, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
         DeleteDC(mem);
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_LBUTTONDOWN:
+        // The Continue button is the affordance, but (splash-screen convention)
+        // a click anywhere dismisses.
+        HostSplashBeginDismiss();
+        return 0;
+    case WM_KEYDOWN:
+        if (w == VK_ESCAPE || w == VK_RETURN || w == VK_SPACE)
+        { HostSplashBeginDismiss(); return 0; }
+        break;
+    }
     return DefWindowProcW(h, m, w, l);
 }
 
-static void HostSplashShow(HINSTANCE hInstance)
+// Draw everything (art, info text, button) once into a plain GDI bitmap so the
+// window's WM_PAINT is a bare BitBlt and GDI+ can be shut down right away.
+static HBITMAP HostSplashRender(HINSTANCE hInstance, int imgSize, int panelW)
 {
     // Pull the PNG bytes out of our resources; any failure just means no splash.
     HRSRC res = FindResourceW(hInstance, MAKEINTRESOURCEW(IDR_LICIUM_SPLASH), (LPCWSTR)RT_RCDATA);
-    if (!res) return;
+    if (!res) return 0;
     DWORD  cb   = SizeofResource(hInstance, res);
     HGLOBAL hres = LoadResource(hInstance, res);
     void  *bytes = hres ? LockResource(hres) : 0;
-    if (!bytes || !cb) return;
+    if (!bytes || !cb) return 0;
 
-    // GDI+ decodes the PNG; we pre-scale it once into a plain GDI bitmap so the
-    // window's WM_PAINT is a bare BitBlt and GDI+ can be shut down right away.
-    // (IStream wants its own copy of the data on an HGLOBAL.)
     ULONG_PTR gpToken = 0;
     Gdiplus::GdiplusStartupInput gpsi;
-    if (Gdiplus::GdiplusStartup(&gpToken, &gpsi, 0) != Gdiplus::Ok) return;
+    if (Gdiplus::GdiplusStartup(&gpToken, &gpsi, 0) != Gdiplus::Ok) return 0;
+
+    HBITMAP bmp = 0;
     {
+        // (IStream wants its own copy of the data on an HGLOBAL.)
         HGLOBAL hcopy = GlobalAlloc(GMEM_MOVEABLE, cb);
-        if (!hcopy) { Gdiplus::GdiplusShutdown(gpToken); return; }
+        if (!hcopy) { Gdiplus::GdiplusShutdown(gpToken); return 0; }
         memcpy(GlobalLock(hcopy), bytes, cb);
         GlobalUnlock(hcopy);
         IStream *stream = 0;
         if (CreateStreamOnHGlobal(hcopy, TRUE, &stream) != S_OK)
-        { GlobalFree(hcopy); Gdiplus::GdiplusShutdown(gpToken); return; }
+        { GlobalFree(hcopy); Gdiplus::GdiplusShutdown(gpToken); return 0; }
 
         Gdiplus::Bitmap png(stream);
         stream->Release();
         if (png.GetLastStatus() == Gdiplus::Ok)
         {
-            g_splashSize = GetSystemMetrics(SM_CYSCREEN) * 2 / 5;   // 40% of screen height
-
             BITMAPINFO bi;
             ZeroMemory(&bi, sizeof(bi));
             bi.bmiHeader.biSize     = sizeof(bi.bmiHeader);
-            bi.bmiHeader.biWidth    = g_splashSize;
-            bi.bmiHeader.biHeight   = -g_splashSize;
+            bi.bmiHeader.biWidth    = imgSize + panelW;
+            bi.bmiHeader.biHeight   = -imgSize;
             bi.bmiHeader.biPlanes   = 1;
             bi.bmiHeader.biBitCount = 32;
             void *bits = 0;
-            g_splashBmp = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
-            if (g_splashBmp)
+            bmp = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+            if (bmp)
             {
                 HDC mem = CreateCompatibleDC(0);
-                HGDIOBJ old = SelectObject(mem, g_splashBmp);
-                Gdiplus::Graphics gfx(mem);
-                gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-                gfx.DrawImage(&png, 0, 0, g_splashSize, g_splashSize);
-                SelectObject(mem, old);
+                HGDIOBJ oldbmp = SelectObject(mem, bmp);
+
+                // Black canvas (matches the wordmark's background), art at left.
+                RECT all = { 0, 0, imgSize + panelW, imgSize };
+                FillRect(mem, &all, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                {
+                    Gdiplus::Graphics gfx(mem);
+                    gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                    gfx.DrawImage(&png, 0, 0, imgSize, imgSize);
+                }
+
+                // Info panel. All sizes scale off the panel so it lays out the
+                // same at any screen resolution. (Layout budget: the text block
+                // must end above the Continue button at bottom-right — keep the
+                // line count/spacing modest if adding lines.)
+                int pad   = panelW / 12;
+                int x     = imgSize + pad;
+                int right = imgSize + panelW - pad;
+                int yTitle = pad;
+                int hTitle = panelW / 7;
+                int hBody  = panelW / 24;
+                int line   = hBody * 5 / 4;
+
+                SetBkMode(mem, TRANSPARENT);
+                HFONT fTitle = CreateFontW(hTitle, 0,0,0, FW_BOLD,  0,0,0, DEFAULT_CHARSET,
+                                           0,0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+                HFONT fBody  = CreateFontW(hBody,  0,0,0, FW_NORMAL,0,0,0, DEFAULT_CHARSET,
+                                           0,0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+
+                HGDIOBJ oldfont = SelectObject(mem, fTitle);
+                SetTextColor(mem, RGB(255,255,255));
+                TextOutW(mem, x, yTitle, L"Licium", 6);
+
+                SelectObject(mem, fBody);
+                int y = yTitle + hTitle + hBody;
+                SetTextColor(mem, RGB(200,200,200));
+                wchar_t ver[128];
+                swprintf(ver, L"Version %s  \x00b7  built %S", LICIUM_VERSION_WSTR, __DATE__);
+                TextOutW(mem, x, y, ver, lstrlenW(ver));                        y += line * 2;
+
+                SetTextColor(mem, RGB(255,255,255));
+                TextOutW(mem, x, y, L"Logo & visual identity by Holly Watson", 38); y += line * 2;
+
+                SetTextColor(mem, RGB(150,150,150));
+                TextOutW(mem, x, y, L"Engine: MilkDrop 2 (BSD 3-clause)", 33);  y += line;
+                TextOutW(mem, x, y, L"\x00a9 2001-2013 Nullsoft, Inc. \x2014 Ryan Geiss", 40); y += line;
+                TextOutW(mem, x, y, L"Spout \x00a9 Lynn Jarvis (BSD)", 26);
+
+                // Continue button, bottom-right of the panel. Purely the visual
+                // affordance — a click anywhere on the splash dismisses it.
+                int btnH = panelW / 8, btnW = panelW / 3;
+                RECT b;
+                b.right  = right;
+                b.bottom = imgSize - pad;
+                b.left   = right - btnW;
+                b.top    = b.bottom - btnH;
+                HBRUSH frame = CreateSolidBrush(RGB(255,255,255));
+                FrameRect(mem, &b, frame);
+                InflateRect(&b, -1, -1);
+                FrameRect(mem, &b, frame);
+                DeleteObject(frame);
+                SetTextColor(mem, RGB(255,255,255));
+                DrawTextW(mem, L"Continue", 8, &b, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                SelectObject(mem, oldfont);
+                DeleteObject(fTitle);
+                DeleteObject(fBody);
+                SelectObject(mem, oldbmp);
                 DeleteDC(mem);
             }
         }
     }
     Gdiplus::GdiplusShutdown(gpToken);
+    return bmp;
+}
+
+static void HostSplashDestroy(void)
+{
+    if (g_splashWnd) { DestroyWindow(g_splashWnd); g_splashWnd = 0; }
+    if (g_splashBmp) { DeleteObject(g_splashBmp);  g_splashBmp = 0; }
+    g_splashDismissAt = 0;
+}
+
+// Show the splash/About panel. activate=0 at startup (the engine window keeps
+// focus, so init isn't disturbed); activate=1 from Help > About (so Esc/Enter
+// can dismiss it). Re-callable: a second call while visible just re-fronts it.
+static void HostSplashShow(HINSTANCE hInstance, int activate)
+{
+    if (g_splashWnd)
+    {
+        g_splashDismissAt = 0;   // was mid-fade? restore it
+        SetLayeredWindowAttributes(g_splashWnd, 0, 255, LWA_ALPHA);
+        SetWindowPos(g_splashWnd, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);
+        return;
+    }
+
+    int imgSize = GetSystemMetrics(SM_CYSCREEN) * 2 / 5;   // 40% of screen height
+    int panelW  = imgSize * 6 / 5;
+    g_splashBmp = HostSplashRender(hInstance, imgSize, panelW);
     if (!g_splashBmp) return;
+    g_splashW = imgSize + panelW;
+    g_splashH = imgSize;
 
     WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -248,37 +406,30 @@ static void HostSplashShow(HINSTANCE hInstance)
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursor(0, IDC_ARROW);
     wc.lpszClassName = L"LiciumSplash";
-    RegisterClassW(&wc);
+    RegisterClassW(&wc);   // fails harmlessly if already registered (About re-show)
 
     int scx = GetSystemMetrics(SM_CXSCREEN), scy = GetSystemMetrics(SM_CYSCREEN);
     g_splashWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,   // toolwindow: no taskbar button
         L"LiciumSplash", L"Licium", WS_POPUP,
-        (scx - g_splashSize) / 2, (scy - g_splashSize) / 2,
-        g_splashSize, g_splashSize, 0, 0, hInstance, 0);
+        (scx - g_splashW) / 2, (scy - g_splashH) / 2,
+        g_splashW, g_splashH, 0, 0, hInstance, 0);
     if (!g_splashWnd) { DeleteObject(g_splashBmp); g_splashBmp = 0; return; }
 
     SetLayeredWindowAttributes(g_splashWnd, 0, 255, LWA_ALPHA);
-    ShowWindow(g_splashWnd, SW_SHOWNA);   // no-activate: engine window keeps focus
+    ShowWindow(g_splashWnd, activate ? SW_SHOW : SW_SHOWNA);
     UpdateWindow(g_splashWnd);            // synchronous first paint (we own the thread)
-    g_splashShownAt = GetTickCount();
 }
 
-static void HostSplashDestroy(void)
-{
-    if (g_splashWnd) { DestroyWindow(g_splashWnd); g_splashWnd = 0; }
-    if (g_splashBmp) { DeleteObject(g_splashBmp);  g_splashBmp = 0; }
-}
-
-// Called once per render-loop iteration: hold, then fade, then tear down.
+// Called once per render-loop iteration: no-op while the splash holds; once a
+// dismiss begins, fade out and tear down.
 static void HostSplashTick(void)
 {
-    if (!g_splashWnd) return;
-    DWORD t = GetTickCount() - g_splashShownAt;
-    if (t < SPLASH_HOLD_MS) return;
-    if (t < SPLASH_HOLD_MS + SPLASH_FADE_MS)
+    if (!g_splashWnd || !g_splashDismissAt) return;
+    DWORD t = GetTickCount() - g_splashDismissAt;
+    if (t < SPLASH_FADE_MS)
         SetLayeredWindowAttributes(g_splashWnd, 0,
-            (BYTE)(255 - 255 * (t - SPLASH_HOLD_MS) / SPLASH_FADE_MS), LWA_ALPHA);
+            (BYTE)(255 - 255 * t / SPLASH_FADE_MS), LWA_ALPHA);
     else
         HostSplashDestroy();
 }
@@ -389,8 +540,17 @@ extern "C" HMENU HostBuildMenuBar(void)
 // "MilkDrop 2"; the window class carries the old plugin icon), then attach the
 // menu bar in windowed mode. The icons live in licium.rc; WM_SETICON overrides
 // the class icon per-window, so the engine's RegisterClass stays untouched.
-extern "C" void HostOnWindowCreated(HWND hwnd, int windowed)
+// Captured from the engine each time it (re)creates its window: the live main
+// hwnd and the resolved config ini path (CPluginShell's accessors for these
+// are protected, and duplicating the engine's ini-path logic would drift).
+static HWND    g_hostMainWnd = 0;
+static wchar_t g_hostIniFile[MAX_PATH] = { 0 };
+
+extern "C" void HostOnWindowCreated(HWND hwnd, int windowed, const wchar_t *iniFile)
 {
+    g_hostMainWnd = hwnd;
+    if (iniFile) wcsncpy_s(g_hostIniFile, MAX_PATH, iniFile, _TRUNCATE);
+
     SetWindowTextW(hwnd, L"Licium");
 
     HINSTANCE hinst = GetModuleHandleW(0);
@@ -504,16 +664,11 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay
         return 1;
     case HM_HELP_ABOUT:
-        // Credit lines mirror brand\CREDITS.md — Holly Watson (identity) and the
-        // Nullsoft/Geiss engine attribution must ship in any distributed build.
-        MessageBoxW(hwnd,
-            L"Licium\n"
-            L"A taste-guided instrument for exploring latent shader space.\n\n"
-            L"Logo and visual identity by Holly Watson.\n\n"
-            L"Engine: clean-room port of MilkDrop 2 (BSD 3-clause)\n"
-            L"Copyright 2005-2013 Nullsoft, Inc. \x2014 originally written by Ryan Geiss.\n"
-            L"Spout texture sharing \x00a9 2020-2024 Lynn Jarvis (BSD).",
-            L"About Licium", MB_OK | MB_ICONINFORMATION);
+        // Photoshop-style: About IS the splash panel. Its credit lines mirror
+        // brand\CREDITS.md — Holly Watson (identity) and the Nullsoft/Geiss
+        // engine attribution must ship in any distributed build — and its
+        // version string comes from licium_version.h, same as the exe metadata.
+        HostSplashShow(GetModuleHandleW(0), 1);
         return 1;
     default:
         return 0;   // not one of ours; let the engine handle it
@@ -559,8 +714,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     CreateThread(0, 0, DialogWatchdog, 0, 0, 0);
 
     // Splash up first: it paints synchronously here, sits topmost through
-    // engine init, and the render loop fades it out (HostSplashTick).
-    HostSplashShow(hInstance);
+    // engine init, and holds until the user dismisses it (Continue/click/Esc);
+    // the render loop animates the fade-out (HostSplashTick).
+    HostSplashShow(hInstance, 0);
 
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
@@ -572,6 +728,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     // Init succeeded and the window/menu are up: stop auto-dismissing modal
     // dialogs so the menu's Open/About boxes work as real user interactions.
     g_suppressDialogs = false;
+
+    // Swap the engine's MilkDrop-era F1 text for the Licium key reference.
+    // (Init loaded its own from a resource; it's never freed, so repointing
+    // the global is safe. The overlay renderer draws wide text when
+    // g_szHelp_W is set.)
+    g_szHelp   = (wchar_t*)LICIUM_HELP_TEXT;
+    g_szHelp_W = 1;
+
+    // Re-apply the maximized state from the last session (saved by
+    // DXContext::SaveWindow; the engine itself only restores position/size,
+    // so a maximized window used to come back normal-sized). The engine's own
+    // WM_SIZE handling resizes the backbuffer, exactly as for a user-driven
+    // maximize. Dev/snapshot runs stay windowed: the flag is only 1 if the
+    // last session actually ended maximized.
+    if (g_hostMainWnd && g_hostIniFile[0] &&
+        GetPrivateProfileIntW(L"settings", L"bMainWndMaximized", 0, g_hostIniFile))
+        ShowWindow(g_hostMainWnd, SW_MAXIMIZE);
 
     // M1c: real audio. Tap the default output device via WASAPI loopback so the
     // visuals react to whatever the machine is actually playing. If it fails to
