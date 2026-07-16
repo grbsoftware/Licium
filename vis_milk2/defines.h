@@ -102,6 +102,26 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // called Libido, then "LibidoClass" would probably be a safe bet.
 #define CLASSNAME       L"MilkDrop2"
 
+#ifdef MILKDROP_STANDALONE
+// Licium surface identity: the standalone exe's user-visible artifacts (the
+// data/preset folder beside the exe, the ini files, the window class) carry
+// the product name; the engine source keeps its MilkDrop names for
+// provenance/diffability against the pristine Geiss tree. The Winamp DLL
+// build never defines MILKDROP_STANDALONE and keeps every original value.
+#undef  SUBDIR
+#undef  INIFILE
+#undef  MSG_INIFILE
+#undef  IMG_INIFILE
+#undef  ADAPTERSFILE
+#undef  CLASSNAME
+#define SUBDIR        L"Licium\\"
+#define INIFILE       L"licium.ini"
+#define MSG_INIFILE   L"licium_msg.ini"
+#define IMG_INIFILE   L"licium_img.ini"
+#define ADAPTERSFILE  L"licium_adapters.txt"
+#define CLASSNAME     L"Licium"
+#endif
+
 // Here you can give names to the buttons (~tabs) along the top
 // of the config panel.  Each button, when clicked, will bring
 // up the corresponding 'property page' (embedded dialog),
