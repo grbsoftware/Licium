@@ -1,0 +1,19 @@
+// licium.rc — resource script for the standalone Licium exe ONLY.
+//
+// Compiled solely by milkdrop_standalone.vcxproj, where it REPLACES plugin.rc
+// as the project's resource script (the Winamp DLL build keeps compiling
+// plugin.rc directly and never sees this file). It #includes the pristine
+// plugin.rc unchanged — the engine still finds its menu, dialogs and string
+// table — and adds the Licium application icon on top.
+//
+// Why the include instead of a second ResourceCompile item: rc.exe numbers the
+// RT_ICON images inside each .res independently, so linking two .res files
+// that both contain icons collides (CVT1100 duplicate resource). One script
+// including the other keeps the numbering sequential.
+//
+// Licium logo and visual identity: Holly Watson (see ..\brand\CREDITS.md).
+
+#include "licium_res.h"
+#include "plugin.rc"
+
+IDI_LICIUM ICON "..\\brand\\licium.ico"

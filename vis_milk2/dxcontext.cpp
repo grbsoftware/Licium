@@ -731,14 +731,14 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS *pParams, BOOL bFirstInit)
 		}
 
 #ifdef MILKDROP_STANDALONE
-		// Standalone host: attach the white-room top menu bar in windowed mode
-		// only (maximized is still WINDOWED). Fullscreen/fake-fullscreen/desktop
-		// use WS_POPUP and get no menu. Because Internal_Init recreates the window
-		// on every mode switch, this keys the menu to the mode automatically.
-		// (Attached before the sizing loop below, so the menu-aware AdjustWindowRect
-		// calls grow the frame and the D3D backbuffer still matches the client.)
-		if (m_current_mode.screenmode == WINDOWED)
-			SetMenu(m_hwnd, HostBuildMenuBar());
+		// Standalone host: apply the Licium identity (title/icon) and attach the
+		// white-room top menu bar in windowed mode only (maximized is still
+		// WINDOWED; fullscreen/fake-fullscreen/desktop use WS_POPUP, no menu).
+		// Because Internal_Init recreates the window on every mode switch, this
+		// keys the menu to the mode automatically. (Runs before the sizing loop
+		// below, so the menu-aware AdjustWindowRect calls grow the frame and the
+		// D3D backbuffer still matches the client.)
+		HostOnWindowCreated(m_hwnd, m_current_mode.screenmode == WINDOWED);
 #endif
 
 		SendMessage(m_hwnd_winamp, WM_WA_IPC, (WPARAM)m_hwnd, IPC_SETVISWND);

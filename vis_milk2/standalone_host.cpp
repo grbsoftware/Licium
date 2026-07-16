@@ -28,6 +28,7 @@
 #include "host_bridge.h"
 #include "wasapi_audio.h"
 #include "host_spout.h"
+#include "licium_res.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -231,18 +232,48 @@ extern "C" HMENU HostBuildMenuBar(void)
     AppendMenuW(audio, MF_POPUP | (nMic ? 0 : MF_GRAYED), (UINT_PTR)mics, L"&Microphones");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)audio, L"&Audio");
 
-    // Options: blocked on the aggregate preset-dials feature -> greyed for now.
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Options");
+    // Tool headings (decided 2026-07-16): one top-level slot per Licium tool —
+    // Bandit (the shader slot machine), Palettes (vote-on-palettes preferences),
+    // Latent (latent-shader-space exploration). Greyed until each tool is
+    // re-ported onto this clean-room base; each then becomes a popup whose list
+    // invokes the tool and carries its options. (A later milestone may nest them
+    // all under one menu — layout is not settled, only the slots are.)
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Bandit");
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Palettes");
+    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Latent");
 
     // Help (holds About, per Windows convention): View Docs surfaces the engine's
     // built-in F1 help overlay.
     HMENU help = CreatePopupMenu();
     AppendMenuW(help, MF_STRING, HM_HELP_DOCS, L"&View Docs");
     AppendMenuW(help, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(help, MF_STRING, HM_HELP_ABOUT, L"&About MilkDrop...");
+    AppendMenuW(help, MF_STRING, HM_HELP_ABOUT, L"&About Licium...");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
 
     return bar;
+}
+
+// Called by dxcontext after every window (re)creation: stamp the Licium
+// identity over the pristine engine's defaults (WINDOWCAPTION titles it
+// "MilkDrop 2"; the window class carries the old plugin icon), then attach the
+// menu bar in windowed mode. The icons live in licium.rc; WM_SETICON overrides
+// the class icon per-window, so the engine's RegisterClass stays untouched.
+extern "C" void HostOnWindowCreated(HWND hwnd, int windowed)
+{
+    SetWindowTextW(hwnd, L"Licium");
+
+    HINSTANCE hinst = GetModuleHandleW(0);
+    // ("small"/"big" avoided as names: rpcndr.h defines `small` as a macro.)
+    HICON hIconBig = (HICON)LoadImageW(hinst, MAKEINTRESOURCEW(IDI_LICIUM), IMAGE_ICON,
+                                       0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    HICON hIconSm  = (HICON)LoadImageW(hinst, MAKEINTRESOURCEW(IDI_LICIUM), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXSMICON),
+                                       GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+    if (hIconBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
+
+    if (windowed)
+        SetMenu(hwnd, HostBuildMenuBar());
 }
 
 // File > Open: pick a .milk preset and load it with a short blend.
@@ -342,11 +373,16 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay
         return 1;
     case HM_HELP_ABOUT:
+        // Credit lines mirror brand\CREDITS.md — Holly Watson (identity) and the
+        // Nullsoft/Geiss engine attribution must ship in any distributed build.
         MessageBoxW(hwnd,
-            L"MilkDrop 2 \x2014 clean-room standalone port\n\n"
-            L"Based on the BSD-licensed MilkDrop 2 (Nullsoft / Ryan Geiss).\n"
-            L"Runs headless \x2014 no Winamp required.",
-            L"About MilkDrop", MB_OK | MB_ICONINFORMATION);
+            L"Licium\n"
+            L"A taste-guided instrument for exploring latent shader space.\n\n"
+            L"Logo and visual identity by Holly Watson.\n\n"
+            L"Engine: clean-room port of MilkDrop 2 (BSD 3-clause)\n"
+            L"Copyright 2005-2013 Nullsoft, Inc. \x2014 originally written by Ryan Geiss.\n"
+            L"Spout texture sharing \x00a9 2020-2024 Lynn Jarvis (BSD).",
+            L"About Licium", MB_OK | MB_ICONINFORMATION);
         return 1;
     default:
         return 0;   // not one of ours; let the engine handle it

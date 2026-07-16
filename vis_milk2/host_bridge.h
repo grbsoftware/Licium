@@ -22,11 +22,17 @@
 extern "C" {
 #endif
 
-// Build a fresh top menu bar (File / Effects / Sprites / Playlist / Audio /
-// Options / Help). Ownership passes to the window via SetMenu(); the OS frees
-// it when the window is destroyed. Called by dxcontext when it creates the
-// windowed-mode window.
+// Build a fresh top menu bar (File / Playlist / Audio / Bandit / Palettes /
+// Latent / Help). Ownership passes to the window via SetMenu(); the OS frees
+// it when the window is destroyed.
 HMENU HostBuildMenuBar(void);
+
+// Called by dxcontext right after it (re)creates the plugin window, in every
+// screen mode. Applies the Licium identity (window title + icon — the pristine
+// engine captions the window WINDOWCAPTION and uses the old plugin-icon class
+// icon) and, when windowed is nonzero, attaches the menu bar. Window recreation
+// on each mode switch re-runs this, so the identity survives mode changes.
+void HostOnWindowCreated(HWND hwnd, int windowed);
 
 // Handle a WM_COMMAND whose id is in the host-menu range. Returns 1 if the id
 // was ours (and was handled), 0 otherwise so the engine keeps processing it.
