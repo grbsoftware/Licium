@@ -315,9 +315,12 @@ static HBITMAP HostSplashRender(HINSTANCE hInstance, int imgSize, int panelW)
                 int pad   = panelW / 12;
                 int x     = imgSize + pad;
                 int right = imgSize + panelW - pad;
+                // The wordmark art already carries the name, so the text-side
+                // "Licium" is just a heading: only slightly larger than the
+                // attribution lines, not a second logo.
                 int yTitle = pad;
-                int hTitle = panelW / 7;
                 int hBody  = panelW / 24;
+                int hTitle = hBody * 4 / 3;
                 int line   = hBody * 5 / 4;
 
                 SetBkMode(mem, TRANSPARENT);
