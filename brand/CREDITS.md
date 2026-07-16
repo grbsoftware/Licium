@@ -36,7 +36,9 @@ distributed build.
 | `licium_icon.svg` | Icon source (256x256, black L + droplet on white) |
 | `licium.ico` | Multi-size app icon: 256, 128, 48, 32, 16 |
 | `licium_icon_*.png` | Per-size PNG renders |
+| `licium_splash.png` | Holly Watson's milk-splash wordmark (1254x1254), shown as the startup splash (embedded via `licium.rc`) |
 
 Note: the droplet is carried at 256/128/48/32 and omitted at 16, where it would
-render as a ~1px speck. The splash wordmark is a separate asset (see the project
-handoff note).
+render as a ~1px speck. The original of the splash wordmark lives in
+`MilkdropProject\brand\` ("Licium brand logo.png"); this repo copy is the one
+that ships.

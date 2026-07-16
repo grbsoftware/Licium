@@ -152,6 +152,137 @@ static DWORD WINAPI DialogWatchdog(LPVOID)
     return 0;
 }
 
+// ---- Startup splash ----------------------------------------------------------
+// Holly Watson's Licium wordmark (embedded as PNG in licium.rc), shown in a
+// borderless topmost window centered on the primary monitor. Non-blocking: it
+// appears before engine init, floats over the opening visuals, then fades out.
+// The render loop drives the hold/fade timing via HostSplashTick(); nothing
+// waits on it, so audio and rendering start exactly as fast as without it.
+
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+
+#define SPLASH_HOLD_MS 2200   // full opacity, from first paint
+#define SPLASH_FADE_MS 500
+
+static HWND    g_splashWnd     = 0;
+static HBITMAP g_splashBmp     = 0;
+static int     g_splashSize    = 0;   // window is square, like the artwork
+static DWORD   g_splashShownAt = 0;
+
+static LRESULT CALLBACK SplashWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_PAINT)
+    {
+        PAINTSTRUCT ps;
+        HDC dc  = BeginPaint(h, &ps);
+        HDC mem = CreateCompatibleDC(dc);
+        HGDIOBJ old = SelectObject(mem, g_splashBmp);
+        BitBlt(dc, 0, 0, g_splashSize, g_splashSize, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static void HostSplashShow(HINSTANCE hInstance)
+{
+    // Pull the PNG bytes out of our resources; any failure just means no splash.
+    HRSRC res = FindResourceW(hInstance, MAKEINTRESOURCEW(IDR_LICIUM_SPLASH), (LPCWSTR)RT_RCDATA);
+    if (!res) return;
+    DWORD  cb   = SizeofResource(hInstance, res);
+    HGLOBAL hres = LoadResource(hInstance, res);
+    void  *bytes = hres ? LockResource(hres) : 0;
+    if (!bytes || !cb) return;
+
+    // GDI+ decodes the PNG; we pre-scale it once into a plain GDI bitmap so the
+    // window's WM_PAINT is a bare BitBlt and GDI+ can be shut down right away.
+    // (IStream wants its own copy of the data on an HGLOBAL.)
+    ULONG_PTR gpToken = 0;
+    Gdiplus::GdiplusStartupInput gpsi;
+    if (Gdiplus::GdiplusStartup(&gpToken, &gpsi, 0) != Gdiplus::Ok) return;
+    {
+        HGLOBAL hcopy = GlobalAlloc(GMEM_MOVEABLE, cb);
+        if (!hcopy) { Gdiplus::GdiplusShutdown(gpToken); return; }
+        memcpy(GlobalLock(hcopy), bytes, cb);
+        GlobalUnlock(hcopy);
+        IStream *stream = 0;
+        if (CreateStreamOnHGlobal(hcopy, TRUE, &stream) != S_OK)
+        { GlobalFree(hcopy); Gdiplus::GdiplusShutdown(gpToken); return; }
+
+        Gdiplus::Bitmap png(stream);
+        stream->Release();
+        if (png.GetLastStatus() == Gdiplus::Ok)
+        {
+            g_splashSize = GetSystemMetrics(SM_CYSCREEN) * 2 / 5;   // 40% of screen height
+
+            BITMAPINFO bi;
+            ZeroMemory(&bi, sizeof(bi));
+            bi.bmiHeader.biSize     = sizeof(bi.bmiHeader);
+            bi.bmiHeader.biWidth    = g_splashSize;
+            bi.bmiHeader.biHeight   = -g_splashSize;
+            bi.bmiHeader.biPlanes   = 1;
+            bi.bmiHeader.biBitCount = 32;
+            void *bits = 0;
+            g_splashBmp = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+            if (g_splashBmp)
+            {
+                HDC mem = CreateCompatibleDC(0);
+                HGDIOBJ old = SelectObject(mem, g_splashBmp);
+                Gdiplus::Graphics gfx(mem);
+                gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                gfx.DrawImage(&png, 0, 0, g_splashSize, g_splashSize);
+                SelectObject(mem, old);
+                DeleteDC(mem);
+            }
+        }
+    }
+    Gdiplus::GdiplusShutdown(gpToken);
+    if (!g_splashBmp) return;
+
+    WNDCLASSW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc   = SplashWndProc;
+    wc.hInstance     = hInstance;
+    wc.hCursor       = LoadCursor(0, IDC_ARROW);
+    wc.lpszClassName = L"LiciumSplash";
+    RegisterClassW(&wc);
+
+    int scx = GetSystemMetrics(SM_CXSCREEN), scy = GetSystemMetrics(SM_CYSCREEN);
+    g_splashWnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,   // toolwindow: no taskbar button
+        L"LiciumSplash", L"Licium", WS_POPUP,
+        (scx - g_splashSize) / 2, (scy - g_splashSize) / 2,
+        g_splashSize, g_splashSize, 0, 0, hInstance, 0);
+    if (!g_splashWnd) { DeleteObject(g_splashBmp); g_splashBmp = 0; return; }
+
+    SetLayeredWindowAttributes(g_splashWnd, 0, 255, LWA_ALPHA);
+    ShowWindow(g_splashWnd, SW_SHOWNA);   // no-activate: engine window keeps focus
+    UpdateWindow(g_splashWnd);            // synchronous first paint (we own the thread)
+    g_splashShownAt = GetTickCount();
+}
+
+static void HostSplashDestroy(void)
+{
+    if (g_splashWnd) { DestroyWindow(g_splashWnd); g_splashWnd = 0; }
+    if (g_splashBmp) { DeleteObject(g_splashBmp);  g_splashBmp = 0; }
+}
+
+// Called once per render-loop iteration: hold, then fade, then tear down.
+static void HostSplashTick(void)
+{
+    if (!g_splashWnd) return;
+    DWORD t = GetTickCount() - g_splashShownAt;
+    if (t < SPLASH_HOLD_MS) return;
+    if (t < SPLASH_HOLD_MS + SPLASH_FADE_MS)
+        SetLayeredWindowAttributes(g_splashWnd, 0,
+            (BYTE)(255 - 255 * (t - SPLASH_HOLD_MS) / SPLASH_FADE_MS), LWA_ALPHA);
+    else
+        HostSplashDestroy();
+}
+
 // ---- White-room menu bar ----------------------------------------------------
 // Reconstructed from the observed MilkDrop 3.33 top menu bar ONLY (no MD3 source
 // was read). We own the equipment; drop-downs are populated only for features
@@ -427,6 +558,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     // screen or stall startup.
     CreateThread(0, 0, DialogWatchdog, 0, 0, 0);
 
+    // Splash up first: it paints synchronously here, sits topmost through
+    // engine init, and the render loop fades it out (HostSplashTick).
+    HostSplashShow(hInstance);
+
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
     // GetModuleFileNameW() find OUR exe and root the config/resource dirs here.
@@ -482,10 +617,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
             phase += 0.18;
         }
 
+        HostSplashTick();
+
         // PluginRender() returns nonzero to keep going, zero to stop.
         if (!g_plugin.PluginRender(waveL, waveR)) running = false;
     }
 
+    HostSplashDestroy();
     WasapiAudioStop();
     HostSpoutShutdown();
     g_plugin.PluginQuit();

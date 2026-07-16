@@ -10,4 +10,8 @@
 
 #define IDI_LICIUM 1
 
+// Holly Watson's milk-splash wordmark, embedded as raw PNG data (RCDATA) and
+// decoded with GDI+ at startup for the splash window.
+#define IDR_LICIUM_SPLASH 2
+
 #endif // LICIUM_RES_H

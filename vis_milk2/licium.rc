@@ -16,4 +16,5 @@
 #include "licium_res.h"
 #include "plugin.rc"
 
-IDI_LICIUM ICON "..\\brand\\licium.ico"
+IDI_LICIUM        ICON   "..\\brand\\licium.ico"
+IDR_LICIUM_SPLASH RCDATA "..\\brand\\licium_splash.png"
