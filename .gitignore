@@ -1,6 +1,8 @@
 # build junk
 Release/
 Debug/
+Release_standalone/
+Debug_standalone/
 *.obj
 *.pdb
 *.ilk

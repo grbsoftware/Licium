@@ -49,6 +49,15 @@
          build: disable incremental linking in both configs. -->
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</LinkIncremental>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkIncremental>
+    <!-- The DLL project (milkdrop.vcxproj) and this exe compile the SAME sources
+         with DIFFERENT defines (MILKDROP_STANDALONE). Both defaulted to obj dir
+         Release\, silently clobbering each other's .obj files -> a stale mixed
+         binary was possible on incremental builds. Keep OutDir=Release\ (runtime
+         staging lives there) but give this project its own obj dir. -->
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Release_standalone\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Debug_standalone\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Release\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Debug\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Midl>
