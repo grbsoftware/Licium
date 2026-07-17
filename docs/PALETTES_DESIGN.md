@@ -1,7 +1,8 @@
 # Palettes design — Licium clean-room re-port (v1)
 
-*Status: DRAFT — awaiting Gary's blessing. Written 2026-07-16, after Bandit v1
-landed (M3). Recommended decisions are marked; nothing here is code yet.*
+*Status: **BLESSED by Gary 2026-07-16** — all three recommended decisions
+accepted as recommended (regen trade / curated library in / 6×5 wall kept).
+Implement FROM this doc; do not reopen the settled decisions.*
 
 ## What Palettes is
 
