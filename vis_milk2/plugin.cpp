@@ -501,6 +501,7 @@ Order of Function Calls
 #include "host_bridge.h"   // standalone-only; no-op in the Winamp DLL build
 #include "licium_bandit.h" // standalone-only; no-op in the Winamp DLL build
 #include "licium_palettes.h" // standalone-only; no-op in the Winamp DLL build
+#include "licium_latent.h" // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
 #include <process.h>  // for beginthread, etc.
@@ -1577,17 +1578,17 @@ int CPlugin::AllocateMyDX9Stuff()
        Auto mode: do a check against a few known, *SLOW* DX9/ps_2_0 cards to see
         if we should run them without pixel shaders instead.
        Here is valve's list of the cards they run DX8 on (mostly because they're too slow under DX9 + ps_2_0):
-            NVIDIA GeForce FX 5200  31.12%
-            ATI Radeon 9200         21.29%
-            NVIDIA GeForce FX 5500  11.27%
-            NVIDIA GeForce4          7.74%
-            NVIDIA GeForce FX 5700   7.12%
-            NVIDIA GeForce FX 5600   5.16%
-            SiS 661FX_760_741        3.34%
-            NVIDIA GeForce FX 5900   3.24%
-            NVIDIA GeForce3          2.09%
-            ATI Radeon 9000          1.98%
-            other                    5.66%
+            NVIDIA GeForce FX 5200ï¿½ 31.12%
+            ATI Radeon 9200ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 21.29%
+            NVIDIA GeForce FX 5500ï¿½ 11.27%
+            NVIDIA GeForce4ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 7.74%
+            NVIDIA GeForce FX 5700ï¿½ï¿½ 7.12%
+            NVIDIA GeForce FX 5600ï¿½ï¿½ 5.16%
+            SiS 661FX_760_741ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 3.34%
+            NVIDIA GeForce FX 5900ï¿½ï¿½ 3.24%
+            NVIDIA GeForce3ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 2.09%
+            ATI Radeon 9000ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 1.98%
+            otherï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 5.66%
             [ from http://www.steampowered.com/status/survey.html ]
             see also: 
                 http://en.wikipedia.org/wiki/Radeon
@@ -5420,6 +5421,29 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
         // Automation: open (wParam=1) / close (0) the palette voting wall.
         if (wParam) PaletteWallOpen(); else PaletteWallClose();
         return 0;
+    case WM_COPYDATA:
+        // Automation: hard-cut-load an exact preset file (Latent Phase B
+        // triage drives verdicts this way â€” see licium_latent.h). SendMessage
+        // delivery means we are on the window's own thread here, same place
+        // BanditRoll() drives g_plugin from.
+        {
+            COPYDATASTRUCT* cd = (COPYDATASTRUCT*)lParam;
+            if (cd && cd->dwData == LICIUM_CD_LOADPRESET && cd->lpData && cd->cbData >= sizeof(wchar_t))
+            {
+                wchar_t path[MAX_PATH];
+                unsigned int n = cd->cbData / sizeof(wchar_t);
+                if (n > MAX_PATH) n = MAX_PATH;
+                memcpy(path, cd->lpData, n * sizeof(wchar_t));
+                path[MAX_PATH - 1] = 0;
+                path[n - 1] = 0;                    // enforce termination
+                if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+                {
+                    LoadPreset(path, 0.0f);         // hard cut, like a Bandit roll
+                    return 1;
+                }
+            }
+            return 0;
+        }
 #endif
     case WM_COMMAND:
 #ifdef MILKDROP_STANDALONE

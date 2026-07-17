@@ -1,0 +1,226 @@
+# latent_triage.ps1 — Latent Phase B: the automated eye (docs\LATENT_DESIGN.md).
+#
+# Loads each untriaged latent roll in the REAL renderer via the WM_COPYDATA
+# hook (licium_latent.h), Spout-grabs it, and verdicts:
+#   black | frozen | blowout | alive | latebloom
+# Quick-look failures get a 40s-settle second look (the late-bloomer lesson);
+# alive-after-development = latebloom, treated as alive downstream. Verdicts
+# APPEND to Licium\latent_verdicts.jsonl — labels, never deletions. A stamped
+# contact sheet of the run's grabs lands next to the verdicts.
+#
+# Manual trigger only in v1. Windows PowerShell 5.1.
+#
+# Usage:
+#   .\latent_triage.ps1                # triage every roll without a verdict
+#   .\latent_triage.ps1 -Limit 10      # first N untriaged only
+#   .\latent_triage.ps1 -KeepOpen      # leave Licium running afterwards
+
+param(
+    [int]$Limit = 0,
+    [switch]$KeepOpen
+)
+
+$ErrorActionPreference = "Stop"
+
+# ---- places (repo layout per docs\ + memory: env\ is in the PARENT dir) -----
+$Repo      = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$ReleaseDir= Join-Path $Repo "vis_milk2\Release"
+$Exe       = Join-Path $ReleaseDir "Licium.exe"
+$LiciumDir = Join-Path $ReleaseDir "Licium"
+$RollsDir  = Join-Path $LiciumDir "presets\latent"
+$Verdicts  = Join-Path $LiciumDir "latent_verdicts.jsonl"
+$EnvDir    = Join-Path (Split-Path -Parent $Repo) "env"
+$Grabber   = Join-Path $EnvDir "spout_grab.exe"
+$OutDir    = Join-Path $EnvDir "out\latent_triage"
+
+if (-not (Test-Path $Exe))     { throw "Licium.exe not found: $Exe" }
+if (-not (Test-Path $Grabber)) { throw "spout_grab.exe not found: $Grabber" }
+New-Item -ItemType Directory -Force $OutDir | Out-Null
+
+# ---- win32 helpers ----------------------------------------------------------
+Add-Type -Name W -Namespace LT -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+public delegate bool EnumProc(IntPtr h, IntPtr l);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+[DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+[StructLayout(LayoutKind.Sequential)] public struct COPYDATASTRUCT { public IntPtr dwData; public int cbData; public IntPtr lpData; }
+[DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, ref COPYDATASTRUCT l);
+public static IntPtr Find(uint pid, string cls) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => {
+        uint p; GetWindowThreadProcessId(h, out p);
+        if (p != pid) return true;
+        var sb = new System.Text.StringBuilder(64);
+        GetClassNameW(h, sb, 64);
+        if (sb.ToString() == cls) { found = h; return false; }
+        return true;
+    }, IntPtr.Zero);
+    return found;
+}
+public static int LoadPreset(IntPtr hwnd, string path) {
+    var bytes = System.Text.Encoding.Unicode.GetBytes(path + "\0");
+    var mem = Marshal.AllocHGlobal(bytes.Length);
+    Marshal.Copy(bytes, 0, mem, bytes.Length);
+    var cd = new COPYDATASTRUCT { dwData = (IntPtr)0x4C4F4144, cbData = bytes.Length, lpData = mem };
+    var r = SendMessageW(hwnd, 0x004A, IntPtr.Zero, ref cd);   // WM_COPYDATA
+    Marshal.FreeHGlobal(mem);
+    return (int)r;
+}
+'@
+
+Add-Type -AssemblyName System.Drawing
+
+# ---- launch Licium detached (WMI — a child process would die with the shell) -
+function Start-Licium {
+    $existing = Get-Process -Name "Licium" -ErrorAction SilentlyContinue
+    if ($existing) { return $existing.Id }
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = "`"$Exe`""; CurrentDirectory = $ReleaseDir }
+    if ($r.ReturnValue -ne 0) { throw "WMI launch failed rc=$($r.ReturnValue) (rc=9 after a build: suspect AV quarantine)" }
+    Start-Sleep -Seconds 4
+    # The splash holds forever until clicked — and swallows posted messages.
+    $splash = [LT.W]::Find([uint32]$r.ProcessId, "LiciumSplash")
+    if ($splash -ne [IntPtr]::Zero) {
+        [LT.W]::PostMessageW($splash, 0x0201, [IntPtr]1, [IntPtr]0) | Out-Null  # WM_LBUTTONDOWN
+        [LT.W]::PostMessageW($splash, 0x0202, [IntPtr]0, [IntPtr]0) | Out-Null  # WM_LBUTTONUP
+        Start-Sleep -Milliseconds 800
+    }
+    return $r.ProcessId
+}
+
+function Get-MainWindow([uint32]$ProcId) {
+    for ($i = 0; $i -lt 20; $i++) {
+        $h = [LT.W]::Find($ProcId, "Licium")
+        if ($h -ne [IntPtr]::Zero) { return $h }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "Licium main window not found (pid $ProcId)"
+}
+
+# ---- grab + measure ---------------------------------------------------------
+function Grab-Frames([string]$Prefix, [int]$Frames, [int]$IntervalMs) {
+    & $Grabber --sender Licium --frames $Frames --interval $IntervalMs --prefix $Prefix --out $OutDir | Out-Null
+    return (Get-ChildItem "$OutDir\$Prefix*.png" | Sort-Object Name)
+}
+
+function Measure-Png([string]$Path) {
+    $bmp = [System.Drawing.Bitmap]::new($Path)
+    try {
+        # 48x48 sample lattice: mean luminance, bright fraction, per-pixel list
+        $lums = New-Object System.Collections.Generic.List[double]
+        $bright = 0; $n = 0
+        for ($y = 0; $y -lt 48; $y++) {
+            for ($x = 0; $x -lt 48; $x++) {
+                $px = $bmp.GetPixel([int](($x + 0.5) * $bmp.Width / 48), [int](($y + 0.5) * $bmp.Height / 48))
+                $l = (0.32 * $px.R + 0.49 * $px.G + 0.29 * $px.B) / 255.0
+                $lums.Add($l); $n++
+                if ($l -gt 0.92) { $bright++ }
+            }
+        }
+        $mean = ($lums | Measure-Object -Average).Average
+        return @{ Mean = $mean; BrightFrac = $bright / $n; Lums = $lums }
+    } finally { $bmp.Dispose() }
+}
+
+function Diff-Lums($A, $B) {
+    $d = 0.0
+    for ($i = 0; $i -lt $A.Count; $i++) { $d += [math]::Abs($A[$i] - $B[$i]) }
+    return $d / $A.Count
+}
+
+# Quick look at one loaded roll: settle, two grabs 1.5s apart.
+function Judge([string]$Prefix) {
+    $pngs = Grab-Frames $Prefix 2 1500
+    if ($pngs.Count -lt 2) { return @{ Verdict = "grabfail"; Mean = 0 } }
+    $a = Measure-Png $pngs[0].FullName
+    $b = Measure-Png $pngs[1].FullName
+    $motion = Diff-Lums $a.Lums $b.Lums
+    if ($b.Mean -lt 0.015)                        { return @{ Verdict = "black";   Mean = $b.Mean; Motion = $motion } }
+    if ($b.BrightFrac -gt 0.85)                   { return @{ Verdict = "blowout"; Mean = $b.Mean; Motion = $motion } }
+    # 0.008, not ~0: the comp's time-animated sheen light drifts even over a
+    # DEAD field, so a flat plate still shows ~0.002-0.004 "motion". Real alive
+    # rolls measured >=0.02 in the first calibration run (2026-07-17).
+    if ($motion -lt 0.008)                        { return @{ Verdict = "frozen";  Mean = $b.Mean; Motion = $motion } }
+    return @{ Verdict = "alive"; Mean = $b.Mean; Motion = $motion }
+}
+
+# ---- main -------------------------------------------------------------------
+$already = @{}
+if (Test-Path $Verdicts) {
+    Get-Content $Verdicts | ForEach-Object {
+        try { $j = $_ | ConvertFrom-Json; $already[$j.id] = $j.verdict } catch {}
+    }
+}
+
+$rolls = @(Get-ChildItem "$RollsDir\latent_LX*.milk" -ErrorAction SilentlyContinue | Sort-Object Name |
+    Where-Object { $_.BaseName -match 'latent_(LX\d+-[0-9A-F]{8})' -and -not $already.ContainsKey($Matches[1]) })
+if ($Limit -gt 0 -and $rolls.Count -gt $Limit) { $rolls = $rolls[0..($Limit - 1)] }
+if ($rolls.Count -eq 0) { Write-Host "nothing untriaged in $RollsDir"; return }
+Write-Host "triage: $($rolls.Count) untriaged roll(s)"
+
+$procId = Start-Licium
+$main = Get-MainWindow ([uint32]$procId)
+
+$results = @()
+foreach ($roll in $rolls) {
+    $null = $roll.BaseName -match 'latent_(LX\d+-[0-9A-F]{8})'
+    $id = $Matches[1]
+    $rc = [LT.W]::LoadPreset($main, $roll.FullName)
+    if ($rc -ne 1) {
+        $res = @{ Verdict = "loadfail"; Mean = 0; Motion = 0 }
+    } else {
+        Start-Sleep -Seconds 4                  # first development
+        $res = Judge "$id`_q"
+        if ($res.Verdict -in @("black", "frozen")) {
+            # The late-bloomer lesson: give quick-look failures a settled look.
+            Start-Sleep -Seconds 40
+            $second = Judge "$id`_s"
+            if ($second.Verdict -eq "alive") {
+                $second.Verdict = "latebloom"
+                $res = $second
+            }
+        }
+    }
+    $line = '{"id":"' + $id + '","verdict":"' + $res.Verdict + '","mean":' +
+        ('{0:0.0000}' -f [double]$res.Mean) + ',"motion":' + ('{0:0.00000}' -f [double]$res.Motion) +
+        ',"when":"' + (Get-Date -Format s) + '"}'
+    Add-Content -Path $Verdicts -Value $line -Encoding ascii
+    Write-Host ("  {0}  {1}  mean={2:0.000} motion={3:0.0000}" -f $id, $res.Verdict, $res.Mean, $res.Motion)
+    $results += @{ Id = $id; Verdict = $res.Verdict }
+}
+
+# ---- contact sheet (stamped: id + verdict under each tile) ------------------
+if ($results.Count -gt 0) {
+    $tileW = 320; $tileH = 200; $label = 26
+    $cols = [math]::Min(6, $results.Count)
+    $rows = [math]::Ceiling($results.Count / $cols)
+    $sheet = [System.Drawing.Bitmap]::new($cols * $tileW, $rows * ($tileH + $label))
+    $g = [System.Drawing.Graphics]::FromImage($sheet)
+    $g.Clear([System.Drawing.Color]::Black)
+    $font = [System.Drawing.Font]::new("Consolas", 10)
+    $white = [System.Drawing.Brushes]::White
+    for ($i = 0; $i -lt $results.Count; $i++) {
+        $r = $results[$i]
+        $x = ($i % $cols) * $tileW; $y = [math]::Floor($i / $cols) * ($tileH + $label)
+        $png = @(Get-ChildItem "$OutDir\$($r.Id)_*.png" | Sort-Object Name | Select-Object -Last 1)
+        if ($png.Count -gt 0) {
+            $tile = [System.Drawing.Bitmap]::new($png[0].FullName)
+            $g.DrawImage($tile, [System.Drawing.Rectangle]::new($x, $y, $tileW, $tileH))
+            $tile.Dispose()
+        }
+        $g.DrawString("$($r.Id)  $($r.Verdict)", $font, $white, $x + 4, $y + $tileH + 4)
+    }
+    $g.Dispose()
+    $sheetPath = Join-Path $OutDir ("sheet_{0}.png" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    $sheet.Save($sheetPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    $sheet.Dispose()
+    Write-Host "contact sheet: $sheetPath"
+}
+
+if (-not $KeepOpen) {
+    Get-Process -Name "Licium" -ErrorAction SilentlyContinue | Stop-Process -Force
+}
+$tally = $results | Group-Object { $_.Verdict } | ForEach-Object { "$($_.Name)=$($_.Count)" }
+Write-Host "done: $($tally -join ', ')  -> $Verdicts"

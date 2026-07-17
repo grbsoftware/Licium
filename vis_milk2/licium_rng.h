@@ -20,6 +20,15 @@ struct LiciumRng
     {
         state = 0x9E3779B9u ^ ((unsigned int)seed << 16) ^ (unsigned int)seed;
     }
+    // 32-bit seeding for the Latent LX-lineage (chains need more entropy than a
+    // 16-bit knob roll). The Knuth multiply avalanches the high bits so that
+    // SEQUENTIAL seeds (the prospector scans ranges) don't start from
+    // near-identical states — an LCG's first draws barely differ when two
+    // states differ only in low bits. Part of the LX1 ID contract.
+    void Seed32(unsigned int seed)
+    {
+        state = 0x9E3779B9u ^ (seed * 2654435761u);
+    }
     unsigned int Next16()
     {
         state = state * 1664525u + 1013904223u;

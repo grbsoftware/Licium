@@ -166,9 +166,14 @@ model, idle-detect.
 3. A real run: ≥100k seeds screened; emitted rolls load in-engine without
    shader errors (compile-by-construction proof); queue.jsonl retains all
    passers.
-4. Phase B headless: verdicts land in the jsonl; a known-black seed
-   verdicts black; contact sheet renders; second-look latebloom path
-   exercised.
+4. Phase B headless: verdicts land in the jsonl; a dead-field seed is
+   caught (verdict `frozen` — *amended 2026-07-17 during implementation:*
+   true `black` is rare by construction, because the comp ramp's deep-color
+   floor tints a dead field into a dim plate, and the time-animated sheen
+   light gives even dead plates ~0.002–0.004 measured motion — the frozen
+   threshold is 0.008 for exactly this reason; `black` stays in the verdict
+   set for render failures); contact sheet renders; second-look latebloom
+   path exercised.
 5. Browser headlessly: open via 0x53, grab shows list + live roll; posted
    votes/tags append correct later-wins lines; auto-advance held while
    open; description typed by hand lands in latent_notes.txt.
