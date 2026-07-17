@@ -123,7 +123,17 @@ guarantee). Equilibrium clamp baked into the template, not the rolled math.
 2. Same-seed double roll → byte-identical files.
 3. Headless: post 6 seeds via the automation hook, Spout-grab each, confirm
    six distinct living visuals + ID overlay visible in grabs.
-4. Audio check: grabs during music vs silence differ (rolls dance).
+4. ~~Audio check: grabs during music vs silence differ (rolls dance).~~
+   **INVALID AS WRITTEN — corrected 2026-07-16 during implementation.** The
+   engine's `bass`/`mid`/`treb` are *relative* measures (immediate / long-running
+   average, `plugin.cpp` ~L9790), and in silence it explicitly pins them to
+   **1.0** (`if (fabsf(long_avg[i]) < 0.001f) imm_rel[i] = 1.0f;`). So they sit
+   near 1.0 in silence AND in steady music, deviating only on transients — a
+   silence-vs-music still comparison shows no difference by design, and two such
+   grabs were confirmed near-identical. Consequences: (a) baseline equilibrium is
+   `injectK` (bass_att≈1), which is what the equilibrium math assumes — correct
+   by construction; (b) the audio guarantee shows up as *beat pulsing*, so it is
+   verified live with music, not from stills.
 5. HOTKEYS.md + F1 overlay updated in the binding commit.
 
 ## Growth path (post-v1, separate blessings)

@@ -116,11 +116,17 @@ static void RollKnobs(unsigned short seed, BanditKnobs* k)
     BanditRng rng;
     rng.Seed(seed);
 
-    k->decay       = rng.F(0.90f, 0.97f);
+    // Decay is PER FRAME, so the useful range is narrow and high: 0.96 is already
+    // a ~17-frame half-life (~0.3s at 60fps), 0.992 is ~85 frames (~1.4s). Below
+    // ~0.96 dye dies as fast as it is laid down and every roll is a thin comet
+    // instead of a plume — the first tuning pass learned that the hard way. This
+    // range is also what the remembered equilibrium ratio (~25-125x) implies:
+    // 1/(1-decay) over this range is 25..125.
+    k->decay       = rng.F(0.960f, 0.992f);
     k->curl        = rng.F(0.6f,  2.4f);
     k->fieldScale  = rng.F(1.8f,  5.5f);
     k->fieldSpeed  = rng.F(0.05f, 0.35f);
-    k->advect      = rng.F(0.6f,  2.2f);
+    k->advect      = rng.F(0.8f,  2.4f);
 
     // Equilibrium law: gain is a multiple of (1-decay), applied at emit time.
     k->injectK     = rng.F(0.5f,  1.5f);
@@ -136,7 +142,10 @@ static void RollKnobs(unsigned short seed, BanditKnobs* k)
     k->srcSX       = rng.F(0.12f, 0.85f);
     k->srcSY       = rng.F(0.12f, 0.85f);
     k->srcPhase    = rng.F(0.0f,  6.283f);
-    k->srcSharp    = rng.F(220.0f, 1400.0f);
+    // Source tightness. exp(-d*d*sharp) at 1400 is a ~3%-radius pinprick, which
+    // advects into a hairline; 60..420 is a soft mouth (~13%..5% radius) that
+    // actually feeds a plume.
+    k->srcSharp    = rng.F(60.0f, 420.0f);
 
     k->iters       = rng.I(1, 3);
 
@@ -154,7 +163,11 @@ static void RollKnobs(unsigned short seed, BanditKnobs* k)
 
     k->sheen       = rng.F(1.0f, 4.0f);
     k->gradGain    = rng.F(1.5f, 6.0f);
-    k->densGain    = rng.F(1.0f, 2.4f);
+    // The medium's luminance sits well below 1 even at equilibrium (the ink is a
+    // mid-luminance color scaled by ~injectK), so a gain near 1 leaves dens ~0.3
+    // and the ramp never climbs off its dark deep stop — the whole roll reads as
+    // a black plate with a smudge. Push it so plume cores reach the accent.
+    k->densGain    = rng.F(2.0f, 4.5f);
 }
 
 // ---- preset emission --------------------------------------------------------
