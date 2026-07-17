@@ -23,6 +23,8 @@
 
 #include "api.h"
 #include "licium_bandit.h"
+#include "licium_palettes.h"   // the liked pool (voting-wall likes) for dressing
+#include "licium_oklab.h"      // LicSrgbLum for the deep->accent sort
 #include "plugin.h"
 
 #include <stdio.h>
@@ -392,6 +394,44 @@ extern "C" int BanditRoll(int seed)
 
     BanditKnobs k;
     RollKnobs(s, &k);
+
+    // Dressing (Palettes integration, blessed decision 1): when the liked pool
+    // is non-empty, ~70% of rolls wear a palette the user actually voted for;
+    // 30% keep their rolled palette as the exploration floor. Both the 70/30
+    // gate and the pool pick come from a SIDE-HASH of the seed, never the LCG
+    // stream — the knob draws above are untouched, so structure stays seed-pure
+    // (the saved file freezes whatever colors the roll wore; regen-from-ID
+    // follows the live pool — the documented trade).
+    {
+        int poolN = PalettePoolCount();
+        unsigned int sh = ((unsigned int)s ^ 0x50414Cu) * 2246822519u;   // 'PAL'
+        if (poolN > 0 && (sh >> 8) % 100u < 70u)
+        {
+            float prgb[5][3];
+            int pn = PalettePoolGet((int)((sh >> 20) % (unsigned int)poolN), prgb);
+            if (pn >= 2)
+            {
+                // Defensive deep->accent sort (stored votes are sorted today,
+                // but imported palettes won't promise it).
+                for (int i = 1; i < pn; i++)
+                    for (int j = i; j > 0 && LicSrgbLum(prgb[j]) < LicSrgbLum(prgb[j-1]); j--)
+                        for (int c = 0; c < 3; c++)
+                        { float t = prgb[j][c]; prgb[j][c] = prgb[j-1][c]; prgb[j-1][c] = t; }
+
+                // The LS2 dressing law: deep = darkest * 0.30 (tinted oily
+                // floor, never gray), mid = middle stop, accent = brightest.
+                int mi = pn / 2;
+                for (int c = 0; c < 3; c++)
+                {
+                    k.pal[0][c] = prgb[0][c] * 0.30f;
+                    k.pal[1][c] = prgb[mi][c];
+                    k.pal[2][c] = prgb[pn-1][c];
+                    // ink leans accent-ward so fresh injection reads bright
+                    k.ink[c]    = prgb[pn-1][c] * 0.65f + prgb[mi][c] * 0.35f;
+                }
+            }
+        }
+    }
 
     BanditText t;
     t.Init();
