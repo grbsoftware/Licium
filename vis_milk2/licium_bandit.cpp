@@ -88,6 +88,7 @@ struct BanditKnobs
     float sheen;            // comp gradient-highlight power
     float gradGain;         // how much buf0's gradient tilts the surface normal
     float densGain;         // how fast density climbs the palette ramp
+    int   arche;            // velocity-field archetype (see EmitPreset)
 };
 
 // HSV -> RGB with an explicit value/saturation ladder, so the ramp is built from
@@ -168,6 +169,12 @@ static void RollKnobs(unsigned short seed, BanditKnobs* k)
     // and the ramp never climbs off its dark deep stop — the whole roll reads as
     // a black plate with a smudge. Push it so plume cores reach the accent.
     k->densGain    = rng.F(2.0f, 4.5f);
+
+    // Velocity-field archetype — appended at the END of the draw order (the
+    // order above is the ID contract). One fixed field formula made every roll
+    // the same comma-spiral in a different color (a 12-seed sweep confirmed it);
+    // the archetype roll is where the composition variety comes from.
+    k->arche       = rng.I(0, 3);
 }
 
 // ---- preset emission --------------------------------------------------------
@@ -259,12 +266,42 @@ static void EmitPreset(unsigned short seed, const BanditKnobs* k, BanditText* t)
     ADDL("    float2 p = (uv - 0.5) * float2(texsize.x*texsize.w, 1.0);");
     ADDL("    float t = time * %.5f;", k->fieldSpeed);
     ADDL("    float a = %.5f;", k->fieldScale);
-    // phi = sin(a*px + t)*cos(a*0.8*py - 0.7t) + 0.5*sin(a*0.6*(px+py) + 1.3t)
-    ADDL("    float s1 = sin(p.x*a + t), c1 = cos(p.x*a + t);");
-    ADDL("    float s2 = sin(p.y*a*0.8 - t*0.7), c2 = cos(p.y*a*0.8 - t*0.7);");
-    ADDL("    float c3 = cos((p.x + p.y)*a*0.6 + t*1.3);");
-    ADDL("    float dphidx = a*c1*c2 + 0.3*a*c3;");
-    ADDL("    float dphidy = -a*0.8*s1*s2 + 0.3*a*c3;");
+    // The velocity is the curl of an analytic potential phi (vel = (dphi/dy,
+    // -dphi/dx)), so every archetype is divergence-free — fluid that neither
+    // sources nor sinks. Four archetypes, four compositions:
+    switch (k->arche)
+    {
+    default:
+    case 0:
+        // SWIRL — one dominant rotation cell (the original v1 field).
+        // phi = sin(a*px + t)*cos(0.8a*py - 0.7t) + 0.5*sin(0.6a*(px+py) + 1.3t)
+        ADDL("    float s1 = sin(p.x*a + t), c1 = cos(p.x*a + t);");
+        ADDL("    float s2 = sin(p.y*a*0.8 - t*0.7), c2 = cos(p.y*a*0.8 - t*0.7);");
+        ADDL("    float c3 = cos((p.x + p.y)*a*0.6 + t*1.3);");
+        ADDL("    float dphidx = a*c1*c2 + 0.3*a*c3;");
+        ADDL("    float dphidy = -a*0.8*s1*s2 + 0.3*a*c3;");
+        break;
+    case 1:
+        // LATTICE — a checkerboard of counter-rotating cells; dye weaves
+        // between them instead of winding one spiral.
+        // phi = sin(a*px + t) * sin(a*py - 0.8t)
+        ADDL("    float dphidx = a*cos(p.x*a + t)*sin(p.y*a - t*0.8);");
+        ADDL("    float dphidy = a*sin(p.x*a + t)*cos(p.y*a - t*0.8);");
+        break;
+    case 2:
+        // STREAM — a meandering horizontal jet with gentle vertical wander.
+        // phi = 1.2*cos(1.5a*py - t) + 0.4*cos(0.5a*px + 0.8t)
+        ADDL("    float dphidx = -0.2*a*sin(p.x*a*0.5 + t*0.8);");
+        ADDL("    float dphidy = -1.8*a*sin(p.y*a*1.5 - t);");
+        break;
+    case 3:
+        // DRIFT-WEAVE — the cell lattice plus a steady linear drift (the
+        // x-linear potential term), so dye rains through the cells.
+        // phi = 0.6*sin(a*px + t)*sin(a*py - 0.8t) + 1.1*px
+        ADDL("    float dphidx = 0.6*a*cos(p.x*a + t)*sin(p.y*a - t*0.8) + 1.1;");
+        ADDL("    float dphidy = 0.6*a*sin(p.x*a + t)*cos(p.y*a - t*0.8);");
+        break;
+    }
     ADDL("    float2 vel = float2(dphidy, -dphidx) * %.5f;", k->curl);
     ADDL("    float2 suv = uv - vel * %.5f * texsize.zw;", k->advect * 6.0f);
     ADDL("    float3 prev = tex2D(sampler_buf0, suv).xyz;");

@@ -84,6 +84,7 @@ Seeded knobs (one LCG stream, fixed order):
 | iters | 1–3 | buf0 intra-frame ping-pong count |
 | palette | 3-stop ramp | hue scheme + luminance ladder deep→mid→accent |
 | sheen | 1–4 | comp gradient-highlight power |
+| field archetype | 4 types | *(added 2026-07-16, appended draw)* the velocity-field composition itself: swirl / cell lattice / meandering stream / drift-weave. One fixed field formula made every roll the same comma-spiral in a different color (12-seed sweep confirmed); this roll is where composition variety comes from. Still one buffer, still curl-advected — within the blessed v1 scope. |
 
 Structure: `bufN_` pass(es) run the medium; warp is a near-passthrough; comp
 reads buf0, shades by gradient, maps through the palette ramp. Emitted shaders
