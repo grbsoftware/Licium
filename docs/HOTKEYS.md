@@ -71,13 +71,14 @@ the printable keys while they are up, so a tool key is shadowed there.
 | Key | Action | Notes |
 |-----|--------|-------|
 | `b` / `B` | Bandit: roll a new preset | ID `L1-XXXX` = the seed; also on the Bandit menu |
+| `v` / `V` | Palettes: open the voting wall | modal while open — the wall eats ALL keys: arrows move, `Y`/`Space` like, `N`/`X` pass, `U` clear, `PgUp/PgDn` page, `V`/`Esc` close |
 
 ## Free for Licium tools
 
-- **Letters (global WM_CHAR):** `c` `p` `v` `x` `z` (upper+lower) — `v` is
-  only used *inside* text prompts (paste), so it is free as a global hotkey.
-  Suggested reservations: `p` Palettes, `x` Latent e**x**plore (`l` is taken
-  by the load menu). (`b` is now taken — Bandit, below.)
+- **Letters (global WM_CHAR):** `c` `p` `x` `z` (upper+lower).
+  Suggested reservations: `x` Latent e**x**plore (`l` is taken by the load
+  menu). (`b` and `v` are now taken — Bandit and the Palettes wall, above;
+  `p` freed up since Palettes took `v`.) (`b` is now taken — Bandit, below.)
 - **Function keys:** `F10`–`F12` (F10 activates the menu bar by Windows
   convention — prefer F11/F12).
 - **Ctrl chords:** the engine binds no Ctrl+letter combos in the standalone

@@ -32,36 +32,11 @@
 extern CPlugin g_plugin;
 
 // ---- deterministic RNG ------------------------------------------------------
-// FIXED SPEC — part of the ID contract, do not "improve" without a GENVER bump.
-// A private LCG, never rand(): rand() is seeded per-process and its sequence is
-// a platform/CRT detail, so an ID rolled today would not regenerate on another
-// box or another compiler. Draws take the HIGH 16 bits because an LCG's low bits
-// have short periods.
-
-struct BanditRng
-{
-    unsigned int state;
-
-    void Seed(unsigned short seed)
-    {
-        state = 0x9E3779B9u ^ ((unsigned int)seed << 16) ^ (unsigned int)seed;
-    }
-    unsigned int Next16()
-    {
-        state = state * 1664525u + 1013904223u;
-        return (state >> 16) & 0xFFFFu;
-    }
-    // Uniform float in [lo,hi].
-    float F(float lo, float hi)
-    {
-        return lo + (hi - lo) * (Next16() / 65535.0f);
-    }
-    // Uniform integer in [lo,hi].
-    int I(int lo, int hi)
-    {
-        return lo + (int)(Next16() % (unsigned int)(hi - lo + 1));
-    }
-};
+// The fixed-spec LCG lives in licium_rng.h, shared by all Licium tools (each
+// tool seeds its own instance; streams never mix). Bandit's ID contract rides
+// on that spec — see the header's warning before touching it.
+#include "licium_rng.h"
+typedef LiciumRng BanditRng;
 
 // ---- rolled knobs -----------------------------------------------------------
 // The draw ORDER below is the contract (a reordered draw = a different preset for

@@ -32,6 +32,7 @@
 #include "licium_res.h"
 #include "licium_version.h"
 #include "licium_bandit.h"
+#include "licium_palettes.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -95,6 +96,8 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"  B            Bandit: roll a brand-new visual (its L1-XXXX ID is the\n"
     L"               seed - roll that ID again for the same visual, and the\n"
     L"               roll is saved under presets\\bandit\\)\n"
+    L"  V            Palettes: the voting wall - like/pass color palettes;\n"
+    L"               Bandit dresses rolls in palettes you liked\n"
     L"\n"
     L"OVERLAYS\n"
     L"  F2 title   F3 time   F4 preset info   F5 fps   F6 rating   N debug\n"
@@ -106,7 +109,7 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"  < >          rotation          [ ] { }  push x / y\n"
     L"\n"
     L"Audio source, playlists and tools live in the menu bar.\n"
-    L"Palettes / Latent are coming milestones.";
+    L"Latent is a coming milestone.";
 
 // Minimal stand-in for Winamp's localization service. The engine has ~280
 // WASABI_API_LNGSTRINGW(...) call sites (preset-name overlay, menus, error
@@ -467,6 +470,8 @@ static void HostSplashTick(void)
 #define HM_BANDIT_ROLL    0xE180   // (0xE140/0xE160 are +index device ranges of 16)
 #define HM_BANDIT_COPYID  0xE181
 #define HM_BANDIT_FOLDER  0xE182
+#define HM_PAL_WALL       0xE190
+#define HM_PAL_VOTES      0xE191
 
 // Command id of the currently-selected audio source (for the menu radio check).
 // Starts on Auto = default output, loopback (matches wasapi_audio's default).
@@ -544,7 +549,14 @@ extern "C" HMENU HostBuildMenuBar(void)
                 HM_BANDIT_COPYID, L"&Copy last ID");
     AppendMenuW(bandit, MF_STRING, HM_BANDIT_FOLDER, L"&Open rolls folder");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)bandit, L"&Bandit");
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Palettes");
+
+    // Palettes is live as of v1: the voting wall trains the liked pool that
+    // Bandit dresses rolls from.
+    HMENU palettes = CreatePopupMenu();
+    AppendMenuW(palettes, MF_STRING, HM_PAL_WALL,  L"&Voting wall\tV");
+    AppendMenuW(palettes, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(palettes, MF_STRING, HM_PAL_VOTES, L"&Open votes file");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)palettes, L"&Palettes");
     AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Latent");
 
     // Help (holds About, per Windows convention): View Docs surfaces the engine's
@@ -642,15 +654,32 @@ static void HostLoadPlaylistDialog(HWND hwnd)
 
 extern "C" int HostHandleChar(int ch)
 {
+    // An open modal owns every char (the wall votes with Y/N/U and closes on V).
+    if (PaletteWallIsOpen())
+        return PaletteWallHandleChar(ch);
+
     switch (ch)
     {
     case 'b':
     case 'B':
         BanditRoll(-1);   // -1 = draw a fresh random seed
         return 1;
+    case 'v':
+    case 'V':
+        PaletteWallOpen();
+        return 1;
     default:
         return 0;         // not a tool key; the engine's hotkeys get it
     }
+}
+
+extern "C" int HostHandleKeydown(int vk)
+{
+    // Only modals consume virtual keys; with nothing open the engine keeps
+    // every key it already had.
+    if (PaletteWallIsOpen())
+        return PaletteWallHandleKeydown(vk);
+    return 0;
 }
 
 extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
@@ -704,6 +733,12 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         return 1;
     case HM_BANDIT_FOLDER:
         ShellExecuteW(hwnd, L"open", BanditGetRollsDir(), NULL, NULL, SW_SHOWNORMAL);
+        return 1;
+    case HM_PAL_WALL:
+        PaletteWallOpen();
+        return 1;
+    case HM_PAL_VOTES:
+        ShellExecuteW(hwnd, L"open", PaletteGetVotesPath(), NULL, NULL, SW_SHOWNORMAL);
         return 1;
     case HM_HELP_DOCS:
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay

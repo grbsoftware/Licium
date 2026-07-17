@@ -500,6 +500,7 @@ Order of Function Calls
 #include "shell_defines.h"
 #include "host_bridge.h"   // standalone-only; no-op in the Winamp DLL build
 #include "licium_bandit.h" // standalone-only; no-op in the Winamp DLL build
+#include "licium_palettes.h" // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
 #include <process.h>  // for beginthread, etc.
@@ -4093,7 +4094,13 @@ void CPlugin::MyRenderFn(int redraw)
     {
         float dt = GetTime() - m_prev_time;
         m_prev_time = GetTime(); // note: m_prev_time is not for general use!
+#ifdef MILKDROP_STANDALONE
+        // Host modals (palette wall) also hold the preset: the auto-advance
+        // timer would otherwise yank the preset mid-vote (the old wall bug).
+        m_bPresetLockedByCode = (m_UI_mode != UI_REGULAR) || PaletteWallIsOpen();
+#else
         m_bPresetLockedByCode = (m_UI_mode != UI_REGULAR);
+#endif
         if (m_bPresetLockedByUser || m_bPresetLockedByCode)
         {
             // to freeze time (at current preset time value) when menus are up or Scroll Lock is on:
@@ -4383,6 +4390,13 @@ void CPlugin::MyRenderUI(
 
     if (!GetFont(DECORATIVE_FONT))
         return;
+
+#ifdef MILKDROP_STANDALONE
+    // Palette voting wall: full-screen modal drawn over the preset, before the
+    // engine's corner texts queue (its own labels queue through m_text and
+    // flush after this pass, landing on top of the swatches).
+    PaletteWallRender(GetDevice(), GetWidth(), GetHeight());
+#endif
 
     // 1. render text in upper-right corner - EXCEPT USER MESSAGE - it goes last b/c it draws a box under itself
     //                                        and it should be visible over everything else (usually an error msg)
@@ -5402,6 +5416,10 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
         // where BanditRoll() must run (it drives g_plugin directly).
         BanditRoll((int)(wParam & 0xFFFF));
         return 0;
+    case WM_LICIUM_WALL:
+        // Automation: open (wParam=1) / close (0) the palette voting wall.
+        if (wParam) PaletteWallOpen(); else PaletteWallClose();
+        return 0;
 #endif
     case WM_COMMAND:
 #ifdef MILKDROP_STANDALONE
@@ -5707,6 +5725,13 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
         return 1; // end case WM_CHAR
 
     case WM_KEYDOWN:    // virtual-key codes
+#ifdef MILKDROP_STANDALONE
+        // Host modals (the palette wall) get first crack at virtual keys; the
+        // hook returns 0 whenever no modal is open. Chars route separately
+        // through HostHandleChar (each action lives in exactly one message).
+        if (HostHandleKeydown((int)wParam))
+            return 0;
+#endif
         // Note that some keys will never reach this point, since they are 
         //   intercepted by the plugin shell (see PluginShellWindowProc(),
         //   at the end of pluginshell.cpp for which ones).

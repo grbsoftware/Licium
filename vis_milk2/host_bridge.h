@@ -49,6 +49,12 @@ int HostHandleMenuCommand(HWND hwnd, int cmd_id);
 // THE AUTHORITATIVE KEY MAP IS docs\HOTKEYS.md — check it before binding.
 int HostHandleChar(int ch);
 
+// Virtual-key (WM_KEYDOWN) companion to HostHandleChar, called host-first at
+// the top of the plugin's WM_KEYDOWN. Returns 1 when a host modal (the palette
+// wall) consumed the key; 0 whenever no modal is open, so the engine's own
+// virtual keys are untouched in normal operation.
+int HostHandleKeydown(int vk);
+
 #ifdef __cplusplus
 }
 #endif
