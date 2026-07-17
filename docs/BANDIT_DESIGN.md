@@ -1,7 +1,8 @@
 # Bandit design — Licium clean-room re-port (v1)
 
-*Status: DRAFT — awaiting Gary's blessing. No code until blessed (same rule as
-LATENT_SEARCH_DESIGN.md). Once blessed, implement FROM this doc.*
+*Status: **BLESSED by Gary 2026-07-16** — all three recommended decisions
+accepted (see the resolved Decisions section at the bottom). Implement FROM
+this doc; do not re-derive or reopen the settled decisions.*
 
 ## What Bandit is
 
@@ -134,14 +135,9 @@ guarantee). Equilibrium clamp baked into the template, not the rolled math.
 - **Expeditions:** named roll folders with manifests.
 - **Latent pillar:** duels/taste-model/prospector per LATENT_SEARCH_DESIGN.md.
 
-## Decisions for Gary
+## Decisions — RESOLVED (Gary, 2026-07-16)
 
-1. **V1 generator richness** — recommended: the single-buffer fluid recipe
-   above (small, proven, exercises M2). Alternative: jump straight to the
-   layered multi-ink architecture (bigger first bite, more to verify).
-2. **Rolls folder** — recommended: `Licium\presets\bandit\` subfolder (keeps
-   the main presets list uncluttered; Playlist can still point at it).
-   Alternative: flat into the active preset folder so auto-advance mixes
-   rolls in immediately.
-3. **Overlay lifetime** — recommended: corner ID persists until the next
-   preset change. Alternative: timed fade (~8 s).
+1. **V1 generator richness:** the single-buffer fluid recipe above (small,
+   proven, exercises M2). Multi-ink layers wait for L2.
+2. **Rolls folder:** `Licium\presets\bandit\` subfolder.
+3. **Overlay lifetime:** corner ID persists until the next preset change.
