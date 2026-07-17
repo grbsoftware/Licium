@@ -1,7 +1,9 @@
 // licium_latent.h — the Latent pillar (docs\LATENT_DESIGN.md).
 //
-// M5a slice: only the headless load hook Phase B triage needs. The Phase C
-// browser (X key, votes/tags/notes) lands in M5b and will grow this header.
+// M5a brought the headless load hook Phase B triage drives verdicts through.
+// M5b adds Phase C: the X browser — browse the prospector's survivors live,
+// like/pass, quick-tag, describe. Votes and words are the raw material the
+// growth-path pheromone/promotion loops feed on; nothing here deletes a roll.
 // Standalone-only, like every Licium tool.
 
 #ifndef LICIUM_LATENT_H
@@ -22,4 +24,52 @@
 // spirit of WM_LICIUM_BANDIT_ROLL (0x51) / WM_LICIUM_WALL (0x52).
 #define LICIUM_CD_LOADPRESET 0x4C4F4144   // 'LOAD'
 
+#ifdef MILKDROP_STANDALONE
+
+#include <windows.h>
+
+struct IDirect3DDevice9;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Automation hook: post to the main window. wParam=1 opens the browser, 0
+// closes. Navigation/votes drive through posted keydowns/chars (physical-key
+// mimicry), same as a hand on the keyboard.
+#define WM_LICIUM_LATENT (WM_APP + 0x53)
+
+// ---- the X browser ----------------------------------------------------------
+// Modal like the palette wall: while open it eats every key, and the engine's
+// auto-advance is held (plugin.cpp derives m_bPresetLockedByCode from
+// LatentBrowserIsOpen). First open shows a landing page; "don't show again"
+// persists to licium.ini (bLatentIntroSeen).
+
+void LatentBrowserOpen(void);
+void LatentBrowserClose(void);
+int  LatentBrowserIsOpen(void);
+
+// WM_CHAR / WM_KEYDOWN while the browser is open (host routes them in). Both
+// return 1 when consumed. While the describe field (engine waitstring) is
+// active, everything except Enter/Esc returns 0 so the engine's own editor
+// handles the text — the browser's labels yield too (the old collision lesson).
+int  LatentBrowserHandleChar(int ch);
+int  LatentBrowserHandleKeydown(int vk);
+
+// Draw the browser (dim side panel + roll list via the engine's text manager).
+// Called from the engine's UI render pass, next to PaletteWallRender.
+void LatentBrowserRender(struct IDirect3DDevice9* dev, int w, int h);
+
+// Help > Show intro pages again: clear the landing page's "don't show again".
+void LatentResetIntro(void);
+
+// Menu accessors (Latent > Open rolls folder / Open notes file).
+const wchar_t* LatentGetRollsDir(void);
+const wchar_t* LatentGetNotesPath(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // MILKDROP_STANDALONE
 #endif // LICIUM_LATENT_H

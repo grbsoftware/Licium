@@ -33,6 +33,7 @@
 #include "licium_version.h"
 #include "licium_bandit.h"
 #include "licium_palettes.h"
+#include "licium_latent.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -98,6 +99,8 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"               roll is saved under presets\\bandit\\)\n"
     L"  V            Palettes: the voting wall - like/pass color palettes;\n"
     L"               Bandit dresses rolls in palettes you liked\n"
+    L"  X            Latent: browse the shader prospector's survivors live -\n"
+    L"               vote, quick-tag (1-6), and D to describe what you see\n"
     L"\n"
     L"OVERLAYS\n"
     L"  F2 title   F3 time   F4 preset info   F5 fps   F6 rating   N debug\n"
@@ -108,8 +111,7 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"  O / o        warp amount       G / g  gamma   Q / q  echo zoom   F  echo flip\n"
     L"  < >          rotation          [ ] { }  push x / y\n"
     L"\n"
-    L"Audio source, playlists and tools live in the menu bar.\n"
-    L"Latent is a coming milestone.";
+    L"Audio source, playlists and tools live in the menu bar.";
 
 // Minimal stand-in for Winamp's localization service. The engine has ~280
 // WASABI_API_LNGSTRINGW(...) call sites (preset-name overlay, menus, error
@@ -472,6 +474,10 @@ static void HostSplashTick(void)
 #define HM_BANDIT_FOLDER  0xE182
 #define HM_PAL_WALL       0xE190
 #define HM_PAL_VOTES      0xE191
+#define HM_LATENT_EXPLORE 0xE1A0
+#define HM_LATENT_FOLDER  0xE1A1
+#define HM_LATENT_NOTES   0xE1A2
+#define HM_HELP_INTRO     0xE132   // Show intro pages again (Help)
 
 // Command id of the currently-selected audio source (for the menu radio check).
 // Starts on Auto = default output, loopback (matches wasapi_audio's default).
@@ -557,12 +563,21 @@ extern "C" HMENU HostBuildMenuBar(void)
     AppendMenuW(palettes, MF_SEPARATOR, 0, NULL);
     AppendMenuW(palettes, MF_STRING, HM_PAL_VOTES, L"&Open votes file");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)palettes, L"&Palettes");
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Latent");
+
+    // Latent is live as of M5b: Explore opens the X browser over the rolls the
+    // offline prospector (tools\latent_prospect) + triage emitted.
+    HMENU latent = CreatePopupMenu();
+    AppendMenuW(latent, MF_STRING, HM_LATENT_EXPLORE, L"&Explore\tX");
+    AppendMenuW(latent, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(latent, MF_STRING, HM_LATENT_FOLDER, L"&Open rolls folder");
+    AppendMenuW(latent, MF_STRING, HM_LATENT_NOTES,  L"Open notes &file");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)latent, L"&Latent");
 
     // Help (holds About, per Windows convention): View Docs surfaces the engine's
     // built-in F1 help overlay.
     HMENU help = CreatePopupMenu();
     AppendMenuW(help, MF_STRING, HM_HELP_DOCS, L"&View Docs");
+    AppendMenuW(help, MF_STRING, HM_HELP_INTRO, L"Show &intro pages again");
     AppendMenuW(help, MF_SEPARATOR, 0, NULL);
     AppendMenuW(help, MF_STRING, HM_HELP_ABOUT, L"&About Licium...");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
@@ -654,9 +669,12 @@ static void HostLoadPlaylistDialog(HWND hwnd)
 
 extern "C" int HostHandleChar(int ch)
 {
-    // An open modal owns every char (the wall votes with Y/N/U and closes on V).
+    // An open modal owns every char (the wall votes with Y/N/U and closes on V;
+    // the latent browser votes/tags/describes and closes on X).
     if (PaletteWallIsOpen())
         return PaletteWallHandleChar(ch);
+    if (LatentBrowserIsOpen())
+        return LatentBrowserHandleChar(ch);
 
     switch (ch)
     {
@@ -667,6 +685,10 @@ extern "C" int HostHandleChar(int ch)
     case 'v':
     case 'V':
         PaletteWallOpen();
+        return 1;
+    case 'x':
+    case 'X':
+        LatentBrowserOpen();
         return 1;
     default:
         return 0;         // not a tool key; the engine's hotkeys get it
@@ -679,6 +701,8 @@ extern "C" int HostHandleKeydown(int vk)
     // every key it already had.
     if (PaletteWallIsOpen())
         return PaletteWallHandleKeydown(vk);
+    if (LatentBrowserIsOpen())
+        return LatentBrowserHandleKeydown(vk);
     return 0;
 }
 
@@ -739,6 +763,18 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         return 1;
     case HM_PAL_VOTES:
         ShellExecuteW(hwnd, L"open", PaletteGetVotesPath(), NULL, NULL, SW_SHOWNORMAL);
+        return 1;
+    case HM_LATENT_EXPLORE:
+        LatentBrowserOpen();
+        return 1;
+    case HM_LATENT_FOLDER:
+        ShellExecuteW(hwnd, L"open", LatentGetRollsDir(), NULL, NULL, SW_SHOWNORMAL);
+        return 1;
+    case HM_LATENT_NOTES:
+        ShellExecuteW(hwnd, L"open", LatentGetNotesPath(), NULL, NULL, SW_SHOWNORMAL);
+        return 1;
+    case HM_HELP_INTRO:
+        LatentResetIntro();
         return 1;
     case HM_HELP_DOCS:
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay

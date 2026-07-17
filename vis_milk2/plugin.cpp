@@ -4096,9 +4096,10 @@ void CPlugin::MyRenderFn(int redraw)
         float dt = GetTime() - m_prev_time;
         m_prev_time = GetTime(); // note: m_prev_time is not for general use!
 #ifdef MILKDROP_STANDALONE
-        // Host modals (palette wall) also hold the preset: the auto-advance
-        // timer would otherwise yank the preset mid-vote (the old wall bug).
-        m_bPresetLockedByCode = (m_UI_mode != UI_REGULAR) || PaletteWallIsOpen();
+        // Host modals (palette wall, latent browser) also hold the preset: the
+        // auto-advance timer would otherwise yank the preset mid-vote (the old
+        // wall bug).
+        m_bPresetLockedByCode = (m_UI_mode != UI_REGULAR) || PaletteWallIsOpen() || LatentBrowserIsOpen();
 #else
         m_bPresetLockedByCode = (m_UI_mode != UI_REGULAR);
 #endif
@@ -4397,6 +4398,9 @@ void CPlugin::MyRenderUI(
     // engine's corner texts queue (its own labels queue through m_text and
     // flush after this pass, landing on top of the swatches).
     PaletteWallRender(GetDevice(), GetWidth(), GetHeight());
+    // Latent browser: side-panel modal, same idiom (yields while the engine's
+    // waitstring is up for a description).
+    LatentBrowserRender(GetDevice(), GetWidth(), GetHeight());
 #endif
 
     // 1. render text in upper-right corner - EXCEPT USER MESSAGE - it goes last b/c it draws a box under itself
@@ -5420,6 +5424,11 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
     case WM_LICIUM_WALL:
         // Automation: open (wParam=1) / close (0) the palette voting wall.
         if (wParam) PaletteWallOpen(); else PaletteWallClose();
+        return 0;
+    case WM_LICIUM_LATENT:
+        // Automation: open (wParam=1) / close (0) the latent browser; drive
+        // navigation and votes with posted keydowns/chars (physical-key mimicry).
+        if (wParam) LatentBrowserOpen(); else LatentBrowserClose();
         return 0;
     case WM_COPYDATA:
         // Automation: hard-cut-load an exact preset file (Latent Phase B
