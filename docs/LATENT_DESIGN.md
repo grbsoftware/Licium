@@ -1,6 +1,9 @@
 # Latent design — Licium clean-room re-port (v1)
 
-*Status: DRAFT — awaiting Gary's blessing. No code until blessed. Heritage:
+*Status: **BLESSED by Gary 2026-07-17** — all three recommended decisions
+accepted as recommended (two-checkpoint build / fresh tool rewrite / LX1
+lineage). Implement FROM this doc; do not reopen the settled decisions.
+Heritage:
 `MilkdropProject\LATENT_SEARCH_DESIGN.md` (settled 2026-07-12) plus the
 lessons paid for during the old tree's LS1/LS2 builds. Companion (future):
 `LATENT_SPACE_ML_DESIGN.md` (taste model — not this doc).*
@@ -186,7 +189,7 @@ model, idle-detect.
 - **Modes dropdown** unifying V/X landing pages; taste model per
   `LATENT_SPACE_ML_DESIGN.md`.
 
-## Decisions for Gary
+## Decisions — RESOLVED (Gary, 2026-07-17, all as recommended)
 
 1. **V1 breadth** — RECOMMENDED: all three phases in one milestone, but
    implemented and committed as two checkpoints: M5a = Phase A + B
