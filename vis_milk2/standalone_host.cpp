@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shellapi.h>   // ShellExecuteW — Bandit > Open rolls folder
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,7 @@
 #include "host_spout.h"
 #include "licium_res.h"
 #include "licium_version.h"
+#include "licium_bandit.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -89,6 +91,11 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"  M            engine settings menu\n"
     L"  S            save preset as...      + / -  rate preset\n"
     L"\n"
+    L"TOOLS\n"
+    L"  B            Bandit: roll a brand-new visual (its L1-XXXX ID is the\n"
+    L"               seed - roll that ID again for the same visual, and the\n"
+    L"               roll is saved under presets\\bandit\\)\n"
+    L"\n"
     L"OVERLAYS\n"
     L"  F2 title   F3 time   F4 preset info   F5 fps   F6 rating   N debug\n"
     L"\n"
@@ -99,7 +106,7 @@ static const wchar_t LICIUM_HELP_TEXT[] =
     L"  < >          rotation          [ ] { }  push x / y\n"
     L"\n"
     L"Audio source, playlists and tools live in the menu bar.\n"
-    L"Bandit / Palettes / Latent are coming milestones.";
+    L"Palettes / Latent are coming milestones.";
 
 // Minimal stand-in for Winamp's localization service. The engine has ~280
 // WASABI_API_LNGSTRINGW(...) call sites (preset-name overlay, menus, error
@@ -457,6 +464,9 @@ static void HostSplashTick(void)
 #define HM_HELP_ABOUT     0xE131
 #define HM_AUDIO_SPK_BASE 0xE140   // Speakers (render/loopback) devices, +index
 #define HM_AUDIO_MIC_BASE 0xE160   // Microphones (capture) devices, +index
+#define HM_BANDIT_ROLL    0xE180   // (0xE140/0xE160 are +index device ranges of 16)
+#define HM_BANDIT_COPYID  0xE181
+#define HM_BANDIT_FOLDER  0xE182
 
 // Command id of the currently-selected audio source (for the menu radio check).
 // Starts on Auto = default output, loopback (matches wasapi_audio's default).
@@ -523,7 +533,17 @@ extern "C" HMENU HostBuildMenuBar(void)
     // re-ported onto this clean-room base; each then becomes a popup whose list
     // invokes the tool and carries its options. (A later milestone may nest them
     // all under one menu — layout is not settled, only the slots are.)
-    AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Bandit");
+    //
+    // Bandit is live as of v1: Roll rolls a fresh seed; the ID it stamps on the
+    // roll is the seed, so the rolls folder + the ID are the whole reproducibility
+    // story. Copy last ID / Open rolls folder are greyed until a roll exists.
+    HMENU bandit = CreatePopupMenu();
+    AppendMenuW(bandit, MF_STRING, HM_BANDIT_ROLL, L"&Roll\tB");
+    AppendMenuW(bandit, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(bandit, MF_STRING | (BanditGetOverlayId() ? 0 : MF_GRAYED),
+                HM_BANDIT_COPYID, L"&Copy last ID");
+    AppendMenuW(bandit, MF_STRING, HM_BANDIT_FOLDER, L"&Open rolls folder");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)bandit, L"&Bandit");
     AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Palettes");
     AppendMenuW(bar, MF_STRING | MF_GRAYED, 0, L"&Latent");
 
@@ -620,6 +640,19 @@ static void HostLoadPlaylistDialog(HWND hwnd)
     CoTaskMemFree(pidl);
 }
 
+extern "C" int HostHandleChar(int ch)
+{
+    switch (ch)
+    {
+    case 'b':
+    case 'B':
+        BanditRoll(-1);   // -1 = draw a fresh random seed
+        return 1;
+    default:
+        return 0;         // not a tool key; the engine's hotkeys get it
+    }
+}
+
 extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
 {
     // Audio source selection (Auto / a Speakers device / a Microphones device).
@@ -662,6 +695,15 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         g_plugin.m_bPresetLockedByUser = true;   // hold the current preset
         g_playlistActive = false;
         EnableMenuItem(GetMenu(hwnd), HM_PLAYLIST_STOP, MF_BYCOMMAND | MF_GRAYED);
+        return 1;
+    case HM_BANDIT_ROLL:
+        BanditRoll(-1);                    // -1 = draw a fresh random seed
+        return 1;
+    case HM_BANDIT_COPYID:
+        BanditCopyIdToClipboard();
+        return 1;
+    case HM_BANDIT_FOLDER:
+        ShellExecuteW(hwnd, L"open", BanditGetRollsDir(), NULL, NULL, SW_SHOWNORMAL);
         return 1;
     case HM_HELP_DOCS:
         g_plugin.ToggleHelp();             // engine's built-in F1 help overlay

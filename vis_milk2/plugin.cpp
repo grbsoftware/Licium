@@ -499,6 +499,7 @@ Order of Function Calls
 #include "defines.h"
 #include "shell_defines.h"
 #include "host_bridge.h"   // standalone-only; no-op in the Winamp DLL build
+#include "licium_bandit.h" // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
 #include <process.h>  // for beginthread, etc.
@@ -4435,6 +4436,21 @@ void CPlugin::MyRenderUI(
     // 3. render text in lower-left corner
     {
         wchar_t buf2[512] = {0};
+#ifdef MILKDROP_STANDALONE
+        // Bandit stamps the current roll's ID here. It has to be queued through
+        // the text manager during this UI pass -- text drawn outside it never
+        // reaches the screen. Lives until the next preset change (BanditOnPresetLoaded).
+        {
+            const wchar_t* szRollId = BanditGetOverlayId();
+            if (szRollId)
+            {
+                wchar_t bufRoll[64];
+                swprintf(bufRoll, L" %s ", szRollId);
+                SelectFont(DECORATIVE_FONT);
+                MyTextOut_Shadow(bufRoll, MTO_LOWER_LEFT);
+            }
+        }
+#endif
         wchar_t buf3[512+1] = {0}; // add two extra spaces to end, so italicized fonts don't get clipped
 
         // render song title in lower-left corner:
@@ -5379,6 +5395,14 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
 
     switch (uMsg)
     {
+#ifdef MILKDROP_STANDALONE
+    case WM_LICIUM_BANDIT_ROLL:
+        // Automation: roll an exact seed (wParam) so a headless run can be
+        // driven and verified. Arrives on the render thread's queue, which is
+        // where BanditRoll() must run (it drives g_plugin directly).
+        BanditRoll((int)(wParam & 0xFFFF));
+        return 0;
+#endif
     case WM_COMMAND:
 #ifdef MILKDROP_STANDALONE
         // Give the standalone host's white-room menu first crack at this command.
@@ -6524,6 +6548,15 @@ int CPlugin::HandleRegularKey(WPARAM wParam)
 	// straight WM_CHAR messages should be sent in.  
 
     // return 0 if you process/absorb the key; otherwise return 1.
+
+#ifdef MILKDROP_STANDALONE
+    // Licium tool hotkeys get first crack at the key, but ONLY in the regular UI
+    // mode: inside the load menu / settings menu / mash-up / a text prompt, those
+    // modes own the printable keys (see docs\HOTKEYS.md). Generic on purpose --
+    // Palettes and Latent bind through this same hook.
+    if (m_UI_mode == UI_REGULAR && HostHandleChar((int)wParam))
+        return 0;  // we processed (or absorbed) the key
+#endif
 
 	if (m_UI_mode == UI_LOAD && ((wParam >= 'A' && wParam <= 'Z') || (wParam >= 'a' && wParam <= 'z')))
 	{
@@ -8188,6 +8221,11 @@ void CPlugin::GenPlasma(int x0, int x1, int y0, int y1, float dt)
 
 void CPlugin::LoadPreset(const wchar_t *szPresetFilename, float fBlendTime)
 {
+#ifdef MILKDROP_STANDALONE
+    // Tell Bandit a preset change happened; it keeps its ID overlay only while
+    // its own roll is the thing on screen.
+    BanditOnPresetLoaded(szPresetFilename);
+#endif
     // clear old error msg...
     if (m_nFramesSinceResize > 4)
     	ClearErrors(ERR_PRESET);     

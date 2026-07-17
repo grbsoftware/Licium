@@ -41,6 +41,14 @@ void HostOnWindowCreated(HWND hwnd, int windowed, const wchar_t *iniFile);
 // was ours (and was handled), 0 otherwise so the engine keeps processing it.
 int HostHandleMenuCommand(HWND hwnd, int cmd_id);
 
+// Licium tool hotkeys. The engine calls this early in HandleRegularKey() with a
+// WM_CHAR character, but only in the regular UI mode — the load/settings/mash-up
+// modes and text prompts own the printable keys while they are up. Returns 1 if
+// the host consumed the key, 0 to let the engine's own hotkeys have it. Generic
+// on purpose: Bandit binds 'b' here, Palettes and Latent will bind their own.
+// THE AUTHORITATIVE KEY MAP IS docs\HOTKEYS.md — check it before binding.
+int HostHandleChar(int ch);
+
 #ifdef __cplusplus
 }
 #endif

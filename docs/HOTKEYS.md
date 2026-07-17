@@ -62,12 +62,22 @@ modes never consume (Ctrl+letter is mostly free, see below).
 | `↑ ↓` | volume (Winamp IPC — inert standalone) | pluginshell |
 | `← →`, `PgUp/PgDn`, `Home/End`, `Enter`, `Backspace`, `Del`, `Ins` | menu/list navigation; Backspace = prev preset in regular mode | mode-dependent |
 
+## Occupied — Licium tool keys (host-first, `HostHandleChar` in `standalone_host.cpp`)
+
+These are checked before the engine's own hotkeys, but only in the regular UI
+mode — the load menu (`L`), settings menu (`M`), mash-up and text prompts own
+the printable keys while they are up, so a tool key is shadowed there.
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `b` / `B` | Bandit: roll a new preset | ID `L1-XXXX` = the seed; also on the Bandit menu |
+
 ## Free for Licium tools
 
-- **Letters (global WM_CHAR):** `b` `c` `p` `v` `x` `z` (upper+lower) — `v` is
+- **Letters (global WM_CHAR):** `c` `p` `v` `x` `z` (upper+lower) — `v` is
   only used *inside* text prompts (paste), so it is free as a global hotkey.
-  Suggested reservations: `b` Bandit, `p` Palettes, `x` Latent e**x**plore
-  (`l` is taken by the load menu).
+  Suggested reservations: `p` Palettes, `x` Latent e**x**plore (`l` is taken
+  by the load menu). (`b` is now taken — Bandit, below.)
 - **Function keys:** `F10`–`F12` (F10 activates the menu bar by Windows
   convention — prefer F11/F12).
 - **Ctrl chords:** the engine binds no Ctrl+letter combos in the standalone
