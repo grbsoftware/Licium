@@ -359,6 +359,20 @@ extern "C" void PaletteWallOpen(void)   { LoadVotes(); g_wallOpen = 1; }
 extern "C" void PaletteWallClose(void)  { g_wallOpen = 0; }
 extern "C" int  PaletteWallIsOpen(void) { return g_wallOpen; }
 
+// Voting flows the cursor forward, and off the last cell it turns the page —
+// working a wall is one hand resting on Y/N, never vote-move-vote-move
+// (Gary's live feedback 2026-07-16: N on the last cell must page too).
+static void WallAdvance(void)
+{
+    if (g_wallCur < WALL_CELLS - 1)
+        g_wallCur++;
+    else
+    {
+        g_wallPage = (g_wallPage + 1) % WALL_PAGES;
+        g_wallCur = 0;
+    }
+}
+
 extern "C" int PaletteWallHandleChar(int ch)
 {
     if (!g_wallOpen) return 0;
@@ -367,13 +381,11 @@ extern "C" int PaletteWallHandleChar(int ch)
     {
     case 'y': case 'Y': case ' ':
         CastVote(seed, 1);
-        // liking flows the cursor forward — voting a page is one hand resting
-        // on Y/Space + arrows, not vote-move-vote-move
-        if (g_wallCur < WALL_CELLS - 1) g_wallCur++;
+        WallAdvance();
         return 1;
     case 'n': case 'N': case 'x': case 'X':
         CastVote(seed, 0);
-        if (g_wallCur < WALL_CELLS - 1) g_wallCur++;
+        WallAdvance();
         return 1;
     case 'u': case 'U':
         CastVote(seed, -1);
@@ -395,8 +407,9 @@ extern "C" int PaletteWallHandleKeydown(int vk)
     case VK_RIGHT:  if (g_wallCur % WALL_COLS < WALL_COLS - 1)  g_wallCur++; return 1;
     case VK_UP:     if (g_wallCur >= WALL_COLS)                 g_wallCur -= WALL_COLS; return 1;
     case VK_DOWN:   if (g_wallCur < WALL_CELLS - WALL_COLS)     g_wallCur += WALL_COLS; return 1;
-    case VK_PRIOR:  g_wallPage = (g_wallPage + WALL_PAGES - 1) % WALL_PAGES; return 1;
-    case VK_NEXT:   g_wallPage = (g_wallPage + 1) % WALL_PAGES; return 1;
+    // a fresh page starts at the top-left, wherever the cursor was before
+    case VK_PRIOR:  g_wallPage = (g_wallPage + WALL_PAGES - 1) % WALL_PAGES; g_wallCur = 0; return 1;
+    case VK_NEXT:   g_wallPage = (g_wallPage + 1) % WALL_PAGES; g_wallCur = 0; return 1;
     case VK_ESCAPE: PaletteWallClose(); return 1;
     default:
         return 1;   // modal: swallow every keydown (incl. Space's keydown half)
@@ -460,7 +473,9 @@ extern "C" void PaletteWallRender(IDirect3DDevice9* dev, int w, int h)
         float cx1 = cx0 + cellW - 2 * pad;
         float cy1 = cy0 + cellH - 2 * pad;
 
-        // vertical bands, deep -> accent left to right
+        // vertical bands, deep -> accent left to right, filling the whole cell
+        // (the vote badge OVERLAYS the bottom edge — reserving a strip for it
+        // left a dead gap under every swatch)
         float bandW = (cx1 - cx0) / n;
         for (int k = 0; k < n; k++)
         {
@@ -468,7 +483,7 @@ extern "C" void PaletteWallRender(IDirect3DDevice9* dev, int w, int h)
                 | ((DWORD)(rgb[k][0] * 255.0f + 0.5f) << 16)
                 | ((DWORD)(rgb[k][1] * 255.0f + 0.5f) << 8)
                 |  (DWORD)(rgb[k][2] * 255.0f + 0.5f);
-            WallRect(dev, w, h, cx0 + k * bandW, cy0, cx0 + (k + 1) * bandW, cy1 - 6.0f, col);
+            WallRect(dev, w, h, cx0 + k * bandW, cy0, cx0 + (k + 1) * bandW, cy1, col);
         }
 
         // vote badge: a bar under the swatch (green like / dark-red pass)
@@ -501,9 +516,11 @@ extern "C" void PaletteWallRender(IDirect3DDevice9* dev, int w, int h)
         static const wchar_t* stratName[4] = { L"oklch", L"curated", L"cosine", L"hsl" };
         swprintf(buf, L"PALETTES   P%d-%04X (%s)   page %d   |   Y/Space like   N pass   U clear   PgUp/PgDn page   V close",
                  PALETTE_GENVER, CellSeed(g_wallPage, g_wallCur), stratName[strat], g_wallPage + 1);
-        RECT r = { 12, 6, w - 12, (int)headerH };
+        // centered in the header band — a fixed top offset reads glued to the
+        // screen edge in fullscreen, where the band is tall
+        RECT r = { 12, 0, w - 12, (int)headerH };
         g_plugin.m_text.DrawTextW(g_plugin.GetFont(SIMPLE_FONT), buf, -1, &r,
-                                  DT_SINGLELINE | DT_NOPREFIX | DT_WORD_ELLIPSIS,
+                                  DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_WORD_ELLIPSIS,
                                   0xFFCCCCCC, false, 0xFF000000);
     }
 }
