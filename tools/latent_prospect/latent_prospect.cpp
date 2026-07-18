@@ -38,6 +38,9 @@
 #include <stdarg.h>
 #include <string.h>
 #include <math.h>
+#include <thread>
+#include <atomic>
+#include <vector>
 
 #include "../../vis_milk2/licium_rng.h"
 #include "../../vis_milk2/licium_oklab.h"
@@ -293,7 +296,7 @@ static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* r
     }
 
     // 4. Full grid at 32x32.
-    static float f0[32 * 32], f1[32 * 32];
+    float f0[32 * 32], f1[32 * 32];   // per-call: ScreenCandidate runs on worker threads
     SettleField(t, lens, decay, 32, 1.0f, 0.5f, f0);
 
     // 2D-axis variance: variation along BOTH axes (kills stripes: a field
@@ -697,6 +700,7 @@ int main(int argc, char** argv)
 {
     unsigned int start = 0, count = 0, single = 0;
     int haveSingle = 0, haveDecode = 0, emitCap = LX_EMIT_CAP;
+    int nThreads = 0;                  // 0 = auto (cores - 2, min 1)
     const char* outdir = NULL;
 
     for (int i = 1; i < argc; i++)
@@ -707,6 +711,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--start")  && i + 1 < argc) start  = (unsigned int)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--count")  && i + 1 < argc) count  = (unsigned int)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--emit")   && i + 1 < argc) emitCap = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) nThreads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
         else { printf("unknown arg: %s\n", argv[i]); return 1; }
     }
@@ -745,45 +750,88 @@ int main(int argc, char** argv)
     if (!count || !outdir)
     {
         printf("latent_prospect (LX%d) — Latent Phase A. docs\\LATENT_DESIGN.md\n", LX_GENVER);
-        printf("  --scan:     --start N --count N --outdir DIR [--emit K (default %d)]\n", LX_EMIT_CAP);
+        printf("  --scan:     --start N --count N --outdir DIR [--emit K (default %d)] [--threads N (default cores-2)]\n", LX_EMIT_CAP);
         printf("  --seed HEX --outdir DIR   screen + force-emit one seed\n");
         printf("  --decode HEX              print chain + formula\n");
         printf("  --selftest                byte-identical double-emission check\n");
         return 1;
     }
 
-    memset(g_dedup, 0, sizeof(g_dedup));
-    Passer* passers = (Passer*)malloc(sizeof(Passer) * 65536);
-    int np = 0, capP = 65536;
-    unsigned int nGrown = 0, nScreened = 0, nDeduped = 0;
-
-    for (unsigned int k = 0; k < count; k++)
+    // ---- parallel screen (2026-07-18): seeds are independent, so workers
+    // take contiguous chunks into private buffers. Concatenating the buffers
+    // in worker order preserves ascending-seed order, and the DEDUP pass runs
+    // sequentially over that merged order afterwards — byte-identical to the
+    // old single-thread loop (first seed with a look-hash still wins).
+    // GPU port considered and rejected: GPU float rounding varies by device/
+    // driver, which would break the "same range = identical queue" contract.
+    if (nThreads <= 0)
     {
-        unsigned int seed = start + k;
-        Tree t;
-        float decay;
-        if (!BuildFromSeed(seed, &t, &decay)) continue;
-        nGrown++;
-        ScreenResult r;
-        if (!ScreenCandidate(&t, LensOfSeed(seed), decay, &r)) continue;
-        nScreened++;
-        if (DedupSeen(r.hash)) { nDeduped++; continue; }
-        if (np == capP)
-        {
-            capP *= 2;
-            Passer* nb = (Passer*)realloc(passers, sizeof(Passer) * capP);
-            if (!nb) break;
-            passers = nb;
-        }
-        passers[np].seed  = seed;
-        passers[np].score = r.score;
-        passers[np].dance = r.dance;
-        passers[np].nodes = t.count;
-        passers[np].hash  = r.hash;
-        np++;
-        if ((k & 0xFFFF) == 0xFFFF)
-            printf("  ...%u/%u scanned, %d passers\n", k + 1, count, np);
+        nThreads = (int)std::thread::hardware_concurrency() - 2;
+        if (nThreads < 1) nThreads = 1;
     }
+    if ((unsigned int)nThreads > count) nThreads = (int)count;
+
+    std::vector<std::vector<Passer> > local((size_t)nThreads);
+    std::vector<unsigned int> wGrown((size_t)nThreads, 0), wScreened((size_t)nThreads, 0);
+    std::atomic<unsigned int> done(0);
+
+    {
+        std::vector<std::thread> pool;
+        unsigned int chunk = count / (unsigned int)nThreads;
+        for (int w = 0; w < nThreads; w++)
+        {
+            unsigned int s0 = start + chunk * (unsigned int)w;
+            unsigned int s1 = (w == nThreads - 1) ? (start + count) : (s0 + chunk);
+            pool.push_back(std::thread([&, w, s0, s1]()
+            {
+                std::vector<Passer>& out = local[(size_t)w];
+                for (unsigned int seed = s0; seed < s1; seed++)
+                {
+                    Tree t;
+                    float decay;
+                    if (BuildFromSeed(seed, &t, &decay))
+                    {
+                        wGrown[(size_t)w]++;
+                        ScreenResult r;
+                        if (ScreenCandidate(&t, LensOfSeed(seed), decay, &r))
+                        {
+                            wScreened[(size_t)w]++;
+                            Passer p;
+                            p.seed  = seed;
+                            p.score = r.score;
+                            p.dance = r.dance;
+                            p.nodes = t.count;
+                            p.hash  = r.hash;
+                            out.push_back(p);
+                        }
+                    }
+                    if ((seed & 0xFFFF) == 0xFFFF)
+                    {
+                        unsigned int d = done.fetch_add(0x10000) + 0x10000;
+                        if ((d & 0xFFFFF) == 0)             // every ~1M seeds
+                            printf("  ...~%u/%u scanned\n", d, count);
+                    }
+                }
+            }));
+        }
+        for (size_t i = 0; i < pool.size(); i++) pool[i].join();
+    }
+
+    memset(g_dedup, 0, sizeof(g_dedup));
+    unsigned int nGrown = 0, nScreened = 0, nDeduped = 0;
+    std::vector<Passer> merged;
+    for (int w = 0; w < nThreads; w++)
+    {
+        nGrown    += wGrown[(size_t)w];
+        nScreened += wScreened[(size_t)w];
+        for (size_t i = 0; i < local[(size_t)w].size(); i++)
+        {
+            if (DedupSeen(local[(size_t)w][i].hash)) { nDeduped++; continue; }
+            merged.push_back(local[(size_t)w][i]);
+        }
+    }
+    Passer* passers = merged.empty() ? NULL : &merged[0];
+    int np = (int)merged.size();
 
     qsort(passers, np, sizeof(Passer), CmpPasser);
 
@@ -809,8 +857,7 @@ int main(int argc, char** argv)
     }
     if (q) fclose(q);
 
-    printf("scan [%u..%u): %u grown, %u passed screens, %u dedup-dropped, %d queued, %d emitted -> %s\n",
-           start, start + count, nGrown, nScreened, nDeduped, np, nEmitted, outdir);
-    free(passers);
+    printf("scan [%u..%u): %u grown, %u passed screens, %u dedup-dropped, %d queued, %d emitted -> %s (%d threads)\n",
+           start, start + count, nGrown, nScreened, nDeduped, np, nEmitted, outdir, nThreads);
     return 0;
 }
