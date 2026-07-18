@@ -96,6 +96,7 @@ struct Tree
 static float g_pher[20][2][19];          // [parent kind|ROOT][child slot][child kind]
 static int   g_swarmOn = 0;
 static float g_lambda  = 0.35f;
+static int   g_seekThreads = 0;          // --seek threads: rank by filament-ness
 
 static int BiasedPick(LiciumRng* rng, int base, int n, int parent, int slot)
 {
@@ -497,6 +498,35 @@ static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* r
 
     float spatial = 0.5f * (rowVar + colVar);
     res->score = spatial * (1.0f + 4.0f * (dance > 0.25f ? 0.25f : dance));
+
+    // --seek threads (Gary, 2026-07-18: "a version that searches for long
+    // threads" — fitting hunt for an app named after the loom thread).
+    // RANK-side only: seed -> shader unchanged, no lineage change; this just
+    // decides which passers surface. Ridge cells = local max across exactly
+    // ONE axis (a filament crest); peaks = local max on both (blob centers).
+    // Fields rich in crests and poor in peaks are thread-worlds. Thresholds
+    // are v1 guesses, tuned against real hauls (doc-amendment convention).
+    if (g_seekThreads)
+    {
+        int nRidge = 0, nPeak = 0;
+        for (int y = 1; y < 31; y++)
+        for (int x = 1; x < 31; x++)
+        {
+            float c = f0[y * 32 + x];
+            if (c < 0.15f) continue;
+            int mx = (c > f0[y * 32 + x - 1] && c > f0[y * 32 + x + 1]);
+            int my = (c > f0[(y - 1) * 32 + x] && c > f0[(y + 1) * 32 + x]);
+            if (mx ^ my) nRidge++;
+            else if (mx && my) nPeak++;
+        }
+        float T = nRidge / 40.0f;
+        if (T > 1.0f) T = 1.0f;
+        float blobby = nPeak / 12.0f;
+        if (blobby > 1.0f) blobby = 1.0f;
+        T *= 1.0f - 0.5f * blobby;
+        res->score *= 0.2f + 1.8f * T;     // thread-rich x2, thread-poor x0.2
+    }
+
     res->dance = dance;
     res->hash  = h;
     return 1;
@@ -868,6 +898,12 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) nThreads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--swarm")  && i + 1 < argc) swarmDir = argv[++i];
         else if (!strcmp(argv[i], "--lambda") && i + 1 < argc) g_lambda = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seek")   && i + 1 < argc)
+        {
+            const char* profile = argv[++i];
+            if (!strcmp(profile, "threads")) g_seekThreads = 1;
+            else { printf("unknown seek profile: %s (profiles: threads)\n", profile); return 1; }
+        }
         else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
         else { printf("unknown arg: %s\n", argv[i]); return 1; }
     }
@@ -910,6 +946,8 @@ int main(int argc, char** argv)
         printf("  --swarm STATEDIR [--lambda F (default 0.35)]   ACO mode: pheromone from\n");
         printf("              votes+verdicts in STATEDIR biases growth; lineage LXS1;\n");
         printf("              table manifest archived next to the queue\n");
+        printf("  --seek threads            rank-side profile: surface filament/thread\n");
+        printf("              visuals (ridge-rich, blob-poor fields); combinable with --swarm\n");
         printf("  --seed HEX --outdir DIR   screen + force-emit one seed\n");
         printf("  --decode HEX              print chain + formula (cold lineages only)\n");
         printf("  --selftest                byte-identical double-emission check\n");
