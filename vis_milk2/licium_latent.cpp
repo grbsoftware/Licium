@@ -254,6 +254,13 @@ static int __cdecl RollCompare(const void* a, const void* b)
 {
     const LatentRoll* ra = (const LatentRoll*)a;
     const LatentRoll* rb = (const LatentRoll*)b;
+    // Voted rolls sink below unvoted ones, likes at the very bottom (Gary,
+    // 2026-07-18: otherwise reaching the votable rolls means skipping over
+    // hundreds of already-rated ones). Sort is applied at open only, so a
+    // vote never moves a roll out from under the cursor mid-session.
+    int ga = (ra->vote == 1) ? 2 : (ra->vote == 0) ? 1 : 0;
+    int gb = (rb->vote == 1) ? 2 : (rb->vote == 0) ? 1 : 0;
+    if (ga != gb) return ga - gb;
     int d = VerdictRank(ra->verdict) - VerdictRank(rb->verdict);
     if (d) return d;
     return wcscmp(ra->id, rb->id);

@@ -61,29 +61,42 @@ So the core design choice (decision 1) is **where the learning acts:**
   prospector reads the ground-truth files (`latent_votes.txt`,
   `latent_verdicts.jsonl`, `latent_tags.txt`), decodes each rated ID's
   chain (deterministic — the IDs regenerate their trees), and accumulates:
-  like **+3**, latebloom-alive **+1.5**, alive **+1**, pass **−0.5**,
-  frozen/black **−1**, blowout **−1.5** per link walked. (Weights are
-  starting values; tuned against the first biased scan and recorded as doc
-  amendments, L1-tuning convention.)
-- ***Amendment 2026-07-18 — the re-audition rule (Gary's, with live proof).***
-  A vote judges **formula × dressing**, not the formula: when the 20 good
-  batch-2 seeds were re-dressed LX1→LX2, 4 of Gary's 8 likes flipped to
-  passes and one pass flipped to a like — same expression strings, different
-  clothes, different verdicts. His stated wish: "the ones I vote no on get a
-  pass with another expression + test — stubs aren't a test of a string
-  working." So NO/pass votes are **soft on first audition**: (a) a formula
-  pass-voted in only ONE dressing enters the **re-audition queue** — the
-  next scan re-emits it with a re-rolled dressing (different palette
-  advance + re-rolled lens; medium too if decision 4 lands) alongside the
-  fresh haul, so it gets a second look in new clothes; (b) the pass
-  deposit (−0.5) lands only after a formula has been passed in **two**
-  different dressings; one audition = no negative deposit at all;
-  (c) a like in ANY audition counts fully (+3) and cancels the queue —
-  positives are the scarce signal and are never discounted. Re-audition
-  IDs carry a dressing-variant suffix (exact format settled at
-  implementation and recorded here; the seed part stays the pure 32-bit
-  formula id). Verdict-based deposits (alive/blowout/frozen) are about the
-  field itself and stay single-shot.
+  like **+3**, latebloom-alive **+1.5**, alive **+1**, frozen/black **−1**,
+  blowout **−1.5** per link walked. (Weights are starting values; tuned
+  against the first biased scan and recorded as doc amendments, L1-tuning
+  convention.) **Votes never deposit negative** — a pass sends the formula
+  to the stub pile instead (amendment below); only Phase B's machine
+  verdicts about the FIELD itself (frozen/blowout) carry negative weight.
+- ***Amendment 2026-07-18 — THE STUB PILE (Gary's rule; supersedes the
+  same-day "re-audition" draft, which allowed a negative deposit after two
+  auditions — Gary struck that: a formula is NEVER written off).***
+  The evidence stands: a vote judges **formula × dressing**, not the
+  formula — when the 20 good batch-2 seeds were re-dressed LX1→LX2, 4 of
+  Gary's 8 likes flipped to passes and one pass flipped to a like on
+  identical expression strings. His rule, stronger than the draft's:
+  - **A pass-voted formula goes to the stub pile.** No negative deposit,
+    not after two auditions, not ever — "leave no stone unturned." The
+    pile is raw material, not a graveyard.
+  - **Each return visit grows ONE new expression layer on the stub:** the
+    stub's tree becomes a subtree under fresh grammar growth (a new node
+    layer grown from a revisit seed), it gets re-dressed, and it goes back
+    through screens → Phase B → the browser like any fresh roll. Voted no
+    again → back on the pile, one layer deeper next time. Repeat "until
+    something works."
+  - **The pile is unbounded by design.** It will grow a lot; when it is
+    huge we return to it in batches (revisit budget per scan alongside
+    fresh seeds — split settled at implementation).
+  - **A like at any depth counts fully (+3)** — positives are the scarce
+    signal and are never discounted; the layered win also hands the
+    subtree miner a beautiful specimen: the working outer layer wrapped
+    around a known-struggling core.
+  - **ID lineage:** a regrowth must regenerate from (parent formula id,
+    layer count, revisit seed) — exact format settled at implementation
+    and recorded here; the original 32-bit seed stays the pure formula id.
+  *(Companion UI change, implemented same day engine-side: browser sort
+  now sinks voted rolls below unvoted, likes at the very bottom, so
+  votable rolls are always on top — otherwise a growing pile means
+  skipping hundreds of rated rolls to reach the first fresh one.)*
 - **Scoring:** passer's pheromone score = mean link weight along its
   chain, squashed; final rank = `raw_score × (1 + λ·pheromone)`, λ ≈ 0.5
   to start. A floor of unbiased picks is reserved (see next point).
@@ -171,8 +184,8 @@ cannot destabilize the app Gary uses.
    side-hash too (swirl / cell lattice / meandering stream / drift-weave,
    the proven Bandit four), in this same milestone (it is emitter-side
    dressing — the CPU screens judge the ink field and are untouched;
-   genver bumps once more, and re-auditions then re-roll medium as well,
-   which makes the second audition a genuinely different stage for the
-   same actor). *Alternative:* keep the fixed swirl for lineage stability
+   genver bumps once more, and stub regrowths re-roll medium as well, so
+   a returning stub plays on a genuinely different stage each visit).
+   *Alternative:* keep the fixed swirl for lineage stability
    and take medium variety in a later pass — smaller step, but every scan
    until then keeps auditioning every formula in the same swirling room.
