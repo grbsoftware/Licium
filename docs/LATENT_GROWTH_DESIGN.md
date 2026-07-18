@@ -1,191 +1,139 @@
-# Latent growth design — pheromone + the promotion loop (DRAFT)
+# Latent growth design — cold prospector, stub pile, and the Bandit gate (DRAFT)
 
-*Status: **DRAFT — awaiting Gary's blessing.** Nothing here is implemented;
-no code until the Decisions section is resolved. Parent doc:
-`LATENT_DESIGN.md` (v1, blessed 2026-07-17), whose growth-path section
-named these items as "post-v1, separate blessings" — this is that blessing
-request for the first two: **pheromone** and the **promotion loop**.
-Trigger: the first real Phase C session happened (2026-07-17 night — 33
-rolls voted, 11 likes) — the loop finally has food.*
+*Status: **DRAFT — awaiting Gary's blessing** on the open decisions at the
+bottom; the architecture itself is his (2026-07-18 direction, superseding
+this doc's first pheromone-centric draft). Parent doc: `LATENT_DESIGN.md`
+(v1, blessed 2026-07-17). No code until blessed.*
 
-## What this milestone is
+## The architecture (Gary, 2026-07-18)
 
-Latent v1 samples chains uniformly: every scan is a cold prospector with no
-memory of what Gary liked. This milestone closes the loop the v1 doc
-promised: **verdicts and words flow backward into later runs.**
+Three laws, from the horse's mouth:
 
-Two features, built in order:
+1. **Latent prospects COLD, every time.** Uniform sampling at
+   ~10M-seed scale per scan (hundreds of thousands of passers into the
+   ever-growing queue). Votes are KEPT — they are the permanent taste
+   record — but ~40 votes a session is statistical dust against that scan
+   scale, and biasing generation or ranking with it would only narrow the
+   search. (This retires the first draft's rank-side pheromone: parked in
+   the growth path, revisit only if vote volume ever rivals scan volume.)
+2. **Votes dictate what flows to BANDIT.** The taste signal's real job is
+   downstream: liked latent discoveries are mined, named, and promoted
+   into Bandit's vocabulary as new ingredients/behaviors. Latent is the
+   mine; Bandit is the jewel box.
+3. **Promotion is GATED — no behavior may flood Bandit.** The swirl lesson
+   at the promotion layer: every promoted behavior gets a mathematically
+   capped share of Bandit's roll distribution, so a hundred liked swirls
+   still cannot make Bandit a swirl machine.
 
-1. **Pheromone** — Phase B verdicts and Phase C votes deposit weight on
-   grammar links; later scans *surface* chains that walk well-trodden
-   liked paths (and bury blowout paths).
-2. **Subtree miner** — a report that digs through the liked rolls' decoded
-   chains for recurring fragments, ranked by how enriched they are vs the
-   general passer population. The report is the raw material for fragment
-   promotion (naming a fragment, making it a vocabulary token) — promotion
-   itself is gated behind a look at the first real report (decision 2).
+**The long game — doping the public version.** Gary keeps rating through
+this curation phase; the accumulated promotions become the interesting-
+behavior starter set the PUBLIC build ships with. Early on the effect on
+Bandit will be small and rolls will stay "slightly boring" — that is
+expected and fine; the pile and the promotions compound.
 
-## The determinism problem (the design's spine)
+## What this milestone builds
 
-The v1 ID contract: `LX1-XXXXXXXX` → seed → tree → emitted `.milk`,
-byte-identical forever. Naive ACO breaks this — if pheromone biases the
-*growth* of trees, then seed → tree depends on the pheromone state at scan
-time, and an ID alone no longer regenerates its roll.
+1. **Scale + hygiene for cold prospecting** — the scan is already cold;
+   make the 10M-seed overnight run the standard cadence (perf pass if
+   needed, idle-priority launcher, queue growth is by design).
+2. **The stub pile** (Gary's rule, unchanged from the amendment below).
+3. **The subtree miner** — mines LIKED rolls for recurring fragments; its
+   report is the promotion pipeline's front door.
+4. **The Bandit gate (design here, implement with Bandit L2 or after):**
+   the promotion path and its influence caps.
 
-So the core design choice (decision 1) is **where the learning acts:**
+## The stub pile (Gary's rule — settled, not a decision)
 
-- **Rank-side (RECOMMENDED):** seed → tree stays pure LX1 — pheromone
-  never touches `BuildFromSeed`. Learning acts on the *ranking*: after
-  screening, each passer's chain is scored against the pheromone table and
-  the score biases which passers get emitted as `.milk` (the queue records
-  both raw and pheromone scores). The same seed always regenerates the
-  same file; what changes between runs is which seeds *surface* out of the
-  millions. Learning = attention, not mutation. **No genver bump; LX1
-  continues.**
-- **Generation-side (true ACO):** pheromone biases token choice during
-  growth. Stronger convergence, but seed → tree now depends on run state:
-  requires an LX2 lineage where every scan archives its pheromone snapshot
-  in a run manifest, and regeneration = seed + manifest. Heavier
-  bookkeeping, and it *narrows the search* (uniform sampling was the v1
-  doc's "proven first haul" choice for a reason). Better saved for when
-  rank-side learning demonstrably starves (i.e., scans stop surfacing
-  anything new that Gary likes).
+- **A pass-voted formula is never written off.** No negative taste deposit
+  of any kind, ever — "leave no stone unturned."
+- A pass-voted formula goes on the **stub pile**. Each return visit grows
+  **one new expression layer** on it (the stub's tree becomes a subtree
+  under fresh grammar growth from a revisit seed), re-dresses it, and
+  sends it back through screens → Phase B → the browser like any fresh
+  roll. Voted no again → back on the pile, one layer deeper next time,
+  "until something works."
+- The pile is unbounded by design; when it is huge we return to it in
+  batches (a revisit budget rides alongside each fresh scan's emissions).
+- **A like at any depth counts fully** and hands the miner a beautiful
+  specimen: a working outer layer wrapped around a known-struggling core.
+- ID lineage: a regrowth regenerates from (parent formula id, layer count,
+  revisit seed); exact format settled at implementation and recorded here.
+- Evidence this is right (2026-07-18): re-dressing LX1→LX2 alone flipped 4
+  of 8 likes to passes and one pass to a like on identical formula strings
+  — a vote judges the whole presentation, so a formula deserves unlimited
+  new presentations.
 
-## Pheromone — mechanics (rank-side version)
+## The subtree miner
 
-- **Links:** a chain decodes to (parent-op, child-slot, chosen-token)
-  transitions — those triples are the pheromone keys, plus a few
-  whole-tree features that verdicts already proved matter (lens, decay
-  band, node-count band).
-- **Deposits (derived, not stored — see decision 3):** at scan start the
-  prospector reads the ground-truth files (`latent_votes.txt`,
-  `latent_verdicts.jsonl`, `latent_tags.txt`), decodes each rated ID's
-  chain (deterministic — the IDs regenerate their trees), and accumulates:
-  like **+3**, latebloom-alive **+1.5**, alive **+1**, frozen/black **−1**,
-  blowout **−1.5** per link walked. (Weights are starting values; tuned
-  against the first biased scan and recorded as doc amendments, L1-tuning
-  convention.) **Votes never deposit negative** — a pass sends the formula
-  to the stub pile instead (amendment below); only Phase B's machine
-  verdicts about the FIELD itself (frozen/blowout) carry negative weight.
-- ***Amendment 2026-07-18 — THE STUB PILE (Gary's rule; supersedes the
-  same-day "re-audition" draft, which allowed a negative deposit after two
-  auditions — Gary struck that: a formula is NEVER written off).***
-  The evidence stands: a vote judges **formula × dressing**, not the
-  formula — when the 20 good batch-2 seeds were re-dressed LX1→LX2, 4 of
-  Gary's 8 likes flipped to passes and one pass flipped to a like on
-  identical expression strings. His rule, stronger than the draft's:
-  - **A pass-voted formula goes to the stub pile.** No negative deposit,
-    not after two auditions, not ever — "leave no stone unturned." The
-    pile is raw material, not a graveyard.
-  - **Each return visit grows ONE new expression layer on the stub:** the
-    stub's tree becomes a subtree under fresh grammar growth (a new node
-    layer grown from a revisit seed), it gets re-dressed, and it goes back
-    through screens → Phase B → the browser like any fresh roll. Voted no
-    again → back on the pile, one layer deeper next time. Repeat "until
-    something works."
-  - **The pile is unbounded by design.** It will grow a lot; when it is
-    huge we return to it in batches (revisit budget per scan alongside
-    fresh seeds — split settled at implementation).
-  - **A like at any depth counts fully (+3)** — positives are the scarce
-    signal and are never discounted; the layered win also hands the
-    subtree miner a beautiful specimen: the working outer layer wrapped
-    around a known-struggling core.
-  - **ID lineage:** a regrowth must regenerate from (parent formula id,
-    layer count, revisit seed) — exact format settled at implementation
-    and recorded here; the original 32-bit seed stays the pure formula id.
-  *(Companion UI change, implemented same day engine-side: browser sort
-  now sinks voted rolls below unvoted, likes at the very bottom, so
-  votable rolls are always on top — otherwise a growing pile means
-  skipping hundreds of rated rolls to reach the first fresh one.)*
-- **Scoring:** passer's pheromone score = mean link weight along its
-  chain, squashed; final rank = `raw_score × (1 + λ·pheromone)`, λ ≈ 0.5
-  to start. A floor of unbiased picks is reserved (see next point).
-- **Exploration floor:** every scan's emit budget reserves ~25% for the
-  TOP RAW-SCORE passers ignoring pheromone (the v1 uniform behavior), so
-  the prospector can never collapse into only re-serving Gary's known
-  taste. (The latebloom lesson generalized: the best thing in a haul is
-  often the thing the filter would have buried.)
-- **Reporting:** scan summary prints how much the bias reordered the emit
-  set (e.g. "14 of 40 emitted rolls were pheromone-promoted") so the
-  effect is visible, not mystical.
+- Prospector mode `--mine`: decodes every LIKED roll's chain, enumerates
+  subtrees (depth 2–4), reports fragments **enriched** vs the passer
+  baseline: frequency ratio, carrier IDs, the fragment's infix formula,
+  and the carriers' tags/notes (naming candidates start from Gary's own
+  words — "descriptions become the names of new ingredients").
+- Output `Licium\latent_mine_report.txt`, human-readable. Nothing
+  automatic: the report is where Gary picks what gets NAMED and promoted.
 
-## Subtree miner
+## The Bandit gate (the new centerpiece)
 
-- New prospector mode `--mine`: reads votes/verdicts, decodes chains,
-  enumerates subtrees (depth 2–4), and reports fragments **enriched** in
-  liked rolls vs the passer baseline (frequency ratio + occurrence count
-  + which liked IDs carry it + the fragment's infix formula).
-- Output: `Licium\latent_mine_report.txt` — human-readable, sorted by
-  enrichment. Nothing automatic happens with it in this milestone: Gary
-  reads the report next to the rolls he liked, and fragment *promotion*
-  (naming one, adding it to the vocabulary as a locked-earned token,
-  GENVER → LX2 since it changes seed → tree) is its own follow-up
-  blessing with real candidates on the table.
-- Notes/tags join the report: a fragment's carrier IDs bring their tags
-  and descriptions along, so naming candidates starts from Gary's own
-  words (the v1 doc's "descriptions become the names of new ingredients").
+The promotion path, end to end:
+
+1. **Mine** — the report surfaces candidate fragments from liked rolls.
+2. **Name** — Gary picks winners and names them (his descriptions/tags).
+3. **Promote** — a named fragment becomes a Bandit-side ingredient (a new
+   entry in an ingredient table Bandit's generator draws from; genver
+   bumps on Bandit's side when the table changes).
+4. **Gate** — the caps (the design's teeth):
+   - **Global guest share `G`:** promoted-from-latent ingredients
+     collectively influence at most `G` of Bandit rolls (a seeded draw
+     decides per roll whether any guest ingredient participates at all).
+     Suggested start: `G = 25%`.
+   - **Per-behavior cap:** within the guest share, no single promoted
+     behavior exceeds a fixed fraction (suggested: equal split, hard cap
+     `G/2` even when only two behaviors exist) — a monoculture cannot
+     form mathematically, however many swirls get promoted.
+   - **Family grouping (the swirl clause):** behaviors judged same-family
+     (by Gary at naming time — e.g. "this is another swirl") share ONE
+     family slot in the split, not one each. Liking a hundred swirls
+     grows the swirl family's QUALITY (best exemplar wins the slot or
+     rotates), never its SHARE.
+   - Caps are constants in the emitted-generator spec (genver-relevant,
+     documented, tunable only via doc amendment).
 
 ## What stays parked (explicitly not this milestone)
 
-Behavior descriptors + MAP-Elites; Phase B idle-detect; mutations 2–4
-(constants / fragment splices / binding swaps); the Modes dropdown; the
-taste model (`LATENT_SPACE_ML_DESIGN.md`); Bandit-vocabulary feedback.
-Each stays a separate blessing per the v1 doc.
-
-## Tooling shape (no engine changes at all)
-
-Everything lands in `tools\latent_prospect\` (the scan already reads no
-engine state; it gains readers for the three ground-truth files) — the
-engine, browser, and DLL are untouched. Zero gating risk: this milestone
-cannot destabilize the app Gary uses.
+Pheromone (rank-side AND generation-side — retired to the shelf unless
+vote volume ever justifies it); behavior descriptors + MAP-Elites; Phase B
+idle-detect; constant/binding mutations; the Modes dropdown; the taste
+model (`LATENT_SPACE_ML_DESIGN.md`).
 
 ## Verification plan
 
-1. Determinism regression: same seed → byte-identical `.milk` before and
-   after the pheromone build (proves rank-side purity); `--selftest` still
-   passes.
-2. Derivation determinism: two `--mine`/scan runs against the same
-   ground-truth files produce identical weights, identical reports,
-   identical emit sets.
-3. Bias sanity: with the real vote files, a scan's emitted set differs
-   from the unbiased set (reorder count > 0) AND the reserved unbiased
-   floor is present.
-4. Negative control: with empty vote/verdict files the scan reproduces
-   v1's exact emit set (λ has nothing to act on).
-5. Miner sanity: the report's top fragments each list ≥2 liked carrier
-   IDs; every listed fragment's infix appears in the decoded formula of
-   its carriers.
-6. Live: a fresh biased scan's haul goes through Phase B + a Gary X
-   session — the real acceptance test is whether the like-rate on
-   pheromone-promoted rolls beats the unbiased floor's. (Not provable
-   headlessly; stated so the goal is on record.)
+1. Determinism regression: `--selftest` byte-identical; a 10M scan twice
+   over the same range produces identical queue lines (cold = pure).
+2. Stub regrowth determinism: same (parent, layer, revisit seed) →
+   byte-identical emission; a layered roll's ID decodes to parent chain +
+   growth layers.
+3. Miner sanity: every reported fragment's infix appears in its carriers'
+   decoded formulas; carriers ≥ 2 for every top-10 fragment.
+4. Gate math: over a large simulated roll count, guest participation →
+   `G ± ε`; no behavior exceeds its cap; family grouping verified with a
+   synthetic two-behaviors-one-family case.
+5. Live: a doped Bandit session for Gary — the acceptance test is that
+   rolls surface promoted behaviors at a noticeable-but-not-dominant rate.
 
 ## Decisions for Gary (bless or amend)
 
-1. **Where learning acts** — RECOMMENDED: rank-side (LX1 continues, IDs
-   stay pure, learning = attention). *Alternative:* generation-side ACO
-   with LX2 + per-run pheromone manifests — stronger but narrower and
-   heavier; revisit when rank-side starves.
-2. **Milestone breadth** — RECOMMENDED: pheromone + miner REPORT only;
-   actual fragment promotion (vocabulary token, LX2 bump) waits until the
-   first report exists and a fragment is worth naming. *Alternative:*
-   include promotion end-to-end now (bigger bite, and it would bump the
-   lineage before the report proves any fragment deserves it).
-3. **Pheromone storage** — RECOMMENDED: stateless — weights derived fresh
-   each run from the vote/verdict/tag files (ground truth stays the only
-   state; nothing to corrupt, evaporation emerges from later-wins votes).
-   *Alternative:* a persistent pheromone file with explicit evaporation —
-   classical ACO, but a second mutable source of truth to keep honest.
-4. ***(Added 2026-07-18)* Medium variety — "the land of swirls."** Gary,
-   after rating the whole batch-2 haul: every roll swirls, because the
-   scaffold's advection medium is a FIXED swirl — the exact failure mode
-   Bandit L1 paid for (one field formula → every roll the same comma-spiral;
-   fixed by rolling the archetype). RECOMMENDED: roll the MEDIUM from a
-   side-hash too (swirl / cell lattice / meandering stream / drift-weave,
-   the proven Bandit four), in this same milestone (it is emitter-side
-   dressing — the CPU screens judge the ink field and are untouched;
-   genver bumps once more, and stub regrowths re-roll medium as well, so
-   a returning stub plays on a genuinely different stage each visit).
-   *Alternative:* keep the fixed swirl for lineage stability
-   and take medium variety in a later pass — smaller step, but every scan
-   until then keeps auditioning every formula in the same swirling room.
+1. **Gate numbers** — RECOMMENDED: `G = 25%` guest share, equal split with
+   `G/2` hard cap, family slots as specced. (Pure taste numbers — pick any
+   you like; they live in the doc and are amendable.)
+2. **Milestone breadth** — RECOMMENDED: stub pile + miner + 10M cadence
+   NOW (all Latent-side, no engine changes); the Bandit gate implements
+   together with Bandit L2 (it touches the same generator tables), using
+   this doc's spec. *Alternative:* everything in one push.
+3. **Medium variety — "the land of swirls."** RECOMMENDED: roll the
+   MEDIUM from a side-hash too (swirl / cell lattice / meandering stream /
+   drift-weave, the proven Bandit four) in the next latent genver — the
+   scaffold's fixed swirl is the Bandit comma-spiral lesson again, and
+   stub regrowths then return on a genuinely different stage each visit.
+   *Alternative:* keep the fixed swirl for lineage stability; medium
+   variety in a later pass.
