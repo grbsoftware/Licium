@@ -16,6 +16,11 @@ Three laws, from the horse's mouth:
    scale, and biasing generation or ranking with it would only narrow the
    search. (This retires the first draft's rank-side pheromone: parked in
    the growth path, revisit only if vote volume ever rivals scan volume.)
+   ***Amendment, same evening:* swarm REVIVED as an experimental second
+   mode** — Gary, recalling the heritage doc's ACO core ("we did swarm
+   intelligence in latent"): *"let's build swarm into this and see what it
+   does."* Cold remains the default cadence; `--swarm` is the experiment
+   beside it. **BUILT 2026-07-18** — see the Swarm mode section.
 2. **Votes dictate what flows to BANDIT.** The taste signal's real job is
    downstream: liked latent discoveries are mined, named, and promoted
    into Bandit's vocabulary as new ingredients/behaviors. Latent is the
@@ -99,12 +104,44 @@ The promotion path, end to end:
    - Caps are constants in the emitted-generator spec (genver-relevant,
      documented, tunable only via doc amendment).
 
+## Swarm mode — BUILT (2026-07-18, generation-side ACO)
+
+`latent_prospect --swarm <LiciumStateDir> [--lambda F]`, the heritage
+doc's ant-colony core made real:
+
+- **Pheromone table** `(parent kind, child slot, child kind) → weight`,
+  derived STATELESS at scan start from `latent_votes.txt` +
+  `latent_verdicts.jsonl` (later-wins): like **+3**, latebloom **+1.5**,
+  alive **+1**, frozen/black **−1**, blowout **−1.5**; pass votes deposit
+  **nothing** (the stub-pile law holds in swarm too).
+- **Bias acts on the kind draw during growth** (`BiasedPick`): weights
+  `1 + λ·w` clamped, floor 0.05 so nothing reaches zero probability
+  (exploration floor). Exactly one RNG draw per node either way, and a
+  flat context reduces to the EXACT cold arithmetic — **a swarm scan over
+  an empty state equals the cold scan tree-for-tree** (verified). Class
+  split (45/20/35) stays structural, unbiased.
+- **Lineage `LXS1-XXXXXXXX`**: seed alone no longer determines the tree,
+  so each swarm run archives its table as `swarm_manifest_<start>_<count>`
+  next to the queue — regeneration = seed + manifest; the `.milk` files
+  remain the permanent artifact. Foreign/LXS ids are skipped during
+  derivation (reported, never guessed). `--decode` stays cold-only.
+- **Multithreaded** like the cold scan (table is read-only during growth).
+- **Verified 2026-07-18:** selftest PASS; cold path byte-identical after
+  the refactor; empty-state = cold invariant; real-state (92 rated ids)
+  deterministic across runs, manifest written; screen-pass rate rose
+  2316 → 2870 on the same 30k range — the bias measurably steers toward
+  structures that survive screens.
+- **The experiment:** run swarm hauls beside cold hauls, triage both, and
+  let Gary's like-rate judge — does concentrating near his taste beat
+  uniform coverage, or does it just breed comfortable sameness? The gate
+  (previous section) protects Bandit either way.
+
 ## What stays parked (explicitly not this milestone)
 
-Pheromone (rank-side AND generation-side — retired to the shelf unless
-vote volume ever justifies it); behavior descriptors + MAP-Elites; Phase B
-idle-detect; constant/binding mutations; the Modes dropdown; the taste
-model (`LATENT_SPACE_ML_DESIGN.md`).
+Rank-side pheromone (superseded — generation-side swarm exists instead);
+behavior descriptors + MAP-Elites; Phase B idle-detect; constant/binding
+mutations; the Modes dropdown; the taste model
+(`LATENT_SPACE_ML_DESIGN.md`).
 
 ## Verification plan
 

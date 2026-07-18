@@ -81,9 +81,59 @@ struct Tree
     int  root;
 };
 
+// ---- swarm mode (Gary, 2026-07-18 evening: revive the heritage doc's ACO
+// core — "build swarm into this and see what it does"; cold stays the default
+// cadence). Pheromone table (parent kind, child slot, child kind) -> weight,
+// derived STATELESS at scan start from latent_votes.txt + latent_verdicts.jsonl
+// (like +3, latebloom +1.5, alive +1, frozen/black -1, blowout -1.5; pass
+// votes deposit NOTHING — the stub-pile law). The bias only deflects the kind
+// draw where pheromone exists: a flat context reduces to the EXACT cold
+// arithmetic (same single Next16 consumed), so a swarm scan over an empty
+// state equals the cold scan tree-for-tree. Lineage LXS1: regeneration =
+// seed + the run's archived table manifest; the .milk file is the artifact.
+
+#define SWARM_ROOT 19                    // parent id for the root draw
+static float g_pher[20][2][19];          // [parent kind|ROOT][child slot][child kind]
+static int   g_swarmOn = 0;
+static float g_lambda  = 0.35f;
+
+static int BiasedPick(LiciumRng* rng, int base, int n, int parent, int slot)
+{
+    const float* w = g_pher[parent][slot];
+    float mn = 1e9f, mx = -1e9f;
+    if (g_swarmOn)
+        for (int k = 0; k < n; k++)
+        {
+            float v = w[base + k];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+    if (!g_swarmOn || mx - mn < 1e-6f)   // flat context = cold arithmetic
+        return base + rng->I(0, n - 1);
+
+    unsigned int wi[19], total = 0;
+    for (int k = 0; k < n; k++)
+    {
+        float v = w[base + k];
+        if (v >  2.5f) v =  2.5f;
+        if (v < -2.5f) v = -2.5f;
+        float f = 1.0f + g_lambda * v;
+        if (f < 0.05f) f = 0.05f;        // exploration floor: nothing hits zero
+        wi[k] = (unsigned int)(f * 1000.0f + 0.5f);
+        total += wi[k];
+    }
+    unsigned int r = rng->Next16() % total;   // still exactly one draw per node
+    for (int k = 0; k < n; k++)
+    {
+        if (r < wi[k]) return base + k;
+        r -= wi[k];
+    }
+    return base + n - 1;
+}
+
 // One class draw + one kind draw per node, always, so the stream is
 // context-free (the decode of a chain never depends on depth bookkeeping).
-static int GrowNode(LiciumRng* rng, Tree* t, int depth)
+static int GrowNode(LiciumRng* rng, Tree* t, int depth, int parent, int slot)
 {
     if (t->count >= LX_MAX_NODES - 2) return -1;
 
@@ -102,20 +152,20 @@ static int GrowNode(LiciumRng* rng, Tree* t, int depth)
 
     if (cls == 0)
     {
-        n->kind = NK_ADD + rng->I(0, 6);
-        n->l = GrowNode(rng, t, depth + 1);
-        n->r = GrowNode(rng, t, depth + 1);
+        n->kind = BiasedPick(rng, NK_ADD, 7, parent, slot);
+        n->l = GrowNode(rng, t, depth + 1, n->kind, 0);
+        n->r = GrowNode(rng, t, depth + 1, n->kind, 1);
         if (n->l < 0 || n->r < 0) return -1;
     }
     else if (cls == 1)
     {
-        n->kind = NK_ABS + rng->I(0, 3);
-        n->l = GrowNode(rng, t, depth + 1);
+        n->kind = BiasedPick(rng, NK_ABS, 4, parent, slot);
+        n->l = GrowNode(rng, t, depth + 1, n->kind, 0);
         if (n->l < 0) return -1;
     }
     else
     {
-        n->kind = NK_PX + rng->I(0, 7);
+        n->kind = BiasedPick(rng, NK_PX, 8, parent, slot);
         if (n->kind == NK_CONST)
             n->cval = rng->I(-20, 20) / 10.0f;   // quantized: prints exactly, decodes exactly
     }
@@ -129,8 +179,111 @@ static int BuildFromSeed(unsigned int seed, Tree* t, float* decay)
     rng.Seed32(seed);
     *decay = rng.F(0.960f, 0.992f);
     t->count = 0;
-    t->root = GrowNode(&rng, t, 0);
+    t->root = GrowNode(&rng, t, 0, SWARM_ROOT, 0);
     return t->root >= 0;
+}
+
+// Deposit a rated tree's links into the pheromone table.
+static void DepositNode(const Tree* t, int i, int parent, int slot, float w)
+{
+    if (i < 0) return;
+    const Node* n = &t->nodes[i];
+    g_pher[parent][slot][n->kind] += w;
+    DepositNode(t, n->l, n->kind, 0, w);
+    DepositNode(t, n->r, n->kind, 1, w);
+}
+
+// Ground-truth reader for swarm mode: latent_votes.txt ("ID 1|0|-1") and
+// latent_verdicts.jsonl from the Licium state dir, later-wins per id, then
+// each rated LX1/LX2 id is COLD-decoded (call this before g_swarmOn goes on)
+// and its links deposited. LXS ids are skipped in v1 (their trees need their
+// own run manifests to regenerate — counted and reported, never guessed).
+struct SwarmRated { char id[24]; float voteW, verdW; };
+static int SwarmFindOrAdd(SwarmRated* arr, int* n, int cap, const char* id)
+{
+    for (int i = 0; i < *n; i++)
+        if (!strcmp(arr[i].id, id)) return i;
+    if (*n >= cap) return -1;
+    strncpy(arr[*n].id, id, 23);
+    arr[*n].id[23] = 0;
+    arr[*n].voteW = arr[*n].verdW = 0.0f;
+    return (*n)++;
+}
+
+static void LoadSwarmState(const char* stateDir, int* outDeposited, int* outForeign)
+{
+    static SwarmRated rated[4096];
+    int nr = 0;
+    char path[1024], line[512];
+
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_votes.txt", stateDir);
+    path[sizeof(path) - 1] = 0;
+    FILE* f = fopen(path, "rb");
+    if (f)
+    {
+        char id[24]; int v;
+        while (fgets(line, sizeof(line), f))
+            if (sscanf(line, "%23s %d", id, &v) == 2)
+            {
+                int i = SwarmFindOrAdd(rated, &nr, 4096, id);
+                if (i >= 0) rated[i].voteW = (v == 1) ? 3.0f : 0.0f;   // stub-pile law: pass = 0
+            }
+        fclose(f);
+    }
+
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_verdicts.jsonl", stateDir);
+    path[sizeof(path) - 1] = 0;
+    f = fopen(path, "rb");
+    if (f)
+    {
+        while (fgets(line, sizeof(line), f))
+        {
+            char* idp = strstr(line, "\"id\":\"");
+            char* vp  = strstr(line, "\"verdict\":\"");
+            if (!idp || !vp) continue;
+            idp += 6;
+            char id[24]; int k = 0;
+            while (idp[k] && idp[k] != '"' && k < 23) { id[k] = idp[k]; k++; }
+            id[k] = 0;
+            vp += 11;
+            float w = 0.0f;
+            if      (!strncmp(vp, "latebloom", 9)) w =  1.5f;
+            else if (!strncmp(vp, "alive",     5)) w =  1.0f;
+            else if (!strncmp(vp, "frozen",    6)) w = -1.0f;
+            else if (!strncmp(vp, "black",     5)) w = -1.0f;
+            else if (!strncmp(vp, "blowout",   7)) w = -1.5f;
+            int i = SwarmFindOrAdd(rated, &nr, 4096, id);
+            if (i >= 0) rated[i].verdW = w;                            // later lines win
+        }
+        fclose(f);
+    }
+
+    *outDeposited = 0;
+    *outForeign = 0;
+    for (int i = 0; i < nr; i++)
+    {
+        float w = rated[i].voteW + rated[i].verdW;
+        if (w == 0.0f) continue;
+        // only pure-seed lineages decode cold; LXS/foreign ids are skipped
+        unsigned int seed;
+        if (!strncmp(rated[i].id, "LX1-", 4) || !strncmp(rated[i].id, "LX2-", 4))
+            seed = (unsigned int)strtoul(rated[i].id + 4, NULL, 16);
+        else { (*outForeign)++; continue; }
+        Tree t;
+        float decay;
+        if (!BuildFromSeed(seed, &t, &decay)) continue;
+        DepositNode(&t, t.root, SWARM_ROOT, 0, w);
+        (*outDeposited)++;
+    }
+}
+
+// Lineage tag for filenames / queue ids: cold = LX<genver>, swarm = LXS1.
+static const char* LineageStr(void)
+{
+    static char cold[8] = { 0 };
+    if (g_swarmOn) return "LXS1";
+    if (!cold[0]) _snprintf(cold, sizeof(cold) - 1, "LX%d", LX_GENVER);
+    return cold;
 }
 
 // ---- side-hashes (documented contract, independent of the LCG stream) -------
@@ -649,7 +802,7 @@ static int EmitRollFile(unsigned int seed, const char* outdir, char* pathOut, si
     s.Init();
     if (!s.buf) return 0;
     EmitPreset(seed, &t, decay, &s);
-    _snprintf(pathOut, pathCap - 1, "%s\\latent_LX%d-%08X.milk", outdir, LX_GENVER, seed);
+    _snprintf(pathOut, pathCap - 1, "%s\\latent_%s-%08X.milk", outdir, LineageStr(), seed);
     pathOut[pathCap - 1] = 0;
     int ok = WriteBytes(pathOut, s.buf, s.len);
     s.Free();
@@ -702,6 +855,7 @@ int main(int argc, char** argv)
     int haveSingle = 0, haveDecode = 0, emitCap = LX_EMIT_CAP;
     int nThreads = 0;                  // 0 = auto (cores - 2, min 1)
     const char* outdir = NULL;
+    const char* swarmDir = NULL;       // --swarm <Licium state dir> = LXS1 mode
 
     for (int i = 1; i < argc; i++)
     {
@@ -712,6 +866,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--count")  && i + 1 < argc) count  = (unsigned int)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--emit")   && i + 1 < argc) emitCap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) nThreads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--swarm")  && i + 1 < argc) swarmDir = argv[++i];
+        else if (!strcmp(argv[i], "--lambda") && i + 1 < argc) g_lambda = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
         else { printf("unknown arg: %s\n", argv[i]); return 1; }
     }
@@ -751,10 +907,25 @@ int main(int argc, char** argv)
     {
         printf("latent_prospect (LX%d) — Latent Phase A. docs\\LATENT_DESIGN.md\n", LX_GENVER);
         printf("  --scan:     --start N --count N --outdir DIR [--emit K (default %d)] [--threads N (default cores-2)]\n", LX_EMIT_CAP);
+        printf("  --swarm STATEDIR [--lambda F (default 0.35)]   ACO mode: pheromone from\n");
+        printf("              votes+verdicts in STATEDIR biases growth; lineage LXS1;\n");
+        printf("              table manifest archived next to the queue\n");
         printf("  --seed HEX --outdir DIR   screen + force-emit one seed\n");
-        printf("  --decode HEX              print chain + formula\n");
+        printf("  --decode HEX              print chain + formula (cold lineages only)\n");
         printf("  --selftest                byte-identical double-emission check\n");
         return 1;
+    }
+
+    if (swarmDir)
+    {
+        memset(g_pher, 0, sizeof(g_pher));
+        int nDep = 0, nForeign = 0;
+        LoadSwarmState(swarmDir, &nDep, &nForeign);   // cold decode BEFORE bias turns on
+        g_swarmOn = 1;
+        printf("swarm: %d rated ids deposited (%d foreign-lineage skipped), lambda=%.2f -> lineage LXS1\n",
+               nDep, nForeign, g_lambda);
+        if (!nDep)
+            printf("swarm: table is flat (no usable ratings) - this scan will equal a cold scan\n");
     }
 
     // ---- parallel screen (2026-07-18): seeds are independent, so workers
@@ -851,13 +1022,35 @@ int main(int argc, char** argv)
         else
             emit = 0;
         if (q)
-            fprintf(q, "{\"id\":\"LX%d-%08X\",\"score\":%.5f,\"dance\":%.5f,\"nodes\":%d,\"hash\":\"%08X\",\"emitted\":%d}\n",
-                    LX_GENVER, passers[i].seed, passers[i].score, passers[i].dance,
+            fprintf(q, "{\"id\":\"%s-%08X\",\"score\":%.5f,\"dance\":%.5f,\"nodes\":%d,\"hash\":\"%08X\",\"emitted\":%d}\n",
+                    LineageStr(), passers[i].seed, passers[i].score, passers[i].dance,
                     passers[i].nodes, passers[i].hash, emit);
     }
     if (q) fclose(q);
 
-    printf("scan [%u..%u): %u grown, %u passed screens, %u dedup-dropped, %d queued, %d emitted -> %s (%d threads)\n",
-           start, start + count, nGrown, nScreened, nDeduped, np, nEmitted, outdir, nThreads);
+    // Swarm runs archive their pheromone table: an LXS1 id regenerates only as
+    // seed + this table (the .milk files stay the permanent artifact anyway).
+    if (g_swarmOn)
+    {
+        char mpath[1024];
+        _snprintf(mpath, sizeof(mpath) - 1, "%s\\swarm_manifest_%u_%u.txt", outdir, start, count);
+        mpath[sizeof(mpath) - 1] = 0;
+        FILE* m = fopen(mpath, "wb");
+        if (m)
+        {
+            fprintf(m, "lineage LXS1  lambda %.4f  range [%u..%u)\n", g_lambda, start, start + count);
+            fprintf(m, "# parent slot child weight (only nonzero entries)\n");
+            for (int p = 0; p < 20; p++)
+                for (int s = 0; s < 2; s++)
+                    for (int k = 0; k < 19; k++)
+                        if (g_pher[p][s][k] != 0.0f)
+                            fprintf(m, "%d %d %d %.4f\n", p, s, k, g_pher[p][s][k]);
+            fclose(m);
+        }
+    }
+
+    printf("scan [%u..%u): %u grown, %u passed screens, %u dedup-dropped, %d queued, %d emitted -> %s (%d threads%s)\n",
+           start, start + count, nGrown, nScreened, nDeduped, np, nEmitted, outdir, nThreads,
+           g_swarmOn ? ", SWARM" : "");
     return 0;
 }
