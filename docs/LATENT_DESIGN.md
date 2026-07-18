@@ -129,6 +129,18 @@ model, idle-detect.
   in hex (chains need more entropy than Bandit's 16-bit knobs). Old-tree
   `LS1-`/`LS2-` IDs are a different lineage and never interchange (same
   rule as Bandit's `L1` vs old `5-`…`26-`).
+- ***Amendment 2026-07-18 — GENVER 2 (`LX2-XXXXXXXX`), Gary's multi-color
+  request.*** Gary's first look at a full haul: "most are one color." Two
+  scaffold causes, both fixed in the emitter (grammar, screens, and the LCG
+  stream untouched — an LX1 id decodes to the same tree; only the dressing
+  changed): (a) `PaletteOfSeed` now advances deterministically to the next
+  COLORFUL curated entry (at least two colors with oklab chroma ≥ 0.06 whose
+  hues differ ≥ 60° — tonal/gray combos skip); (b) the comp ramp grew from 3
+  to 4 stops (deep / two interior thirds / accent) so rising density
+  traverses the palette's hues, not just its luminance ladder. LX1 `.milk`
+  files on disk remain the v1 archive (regenerable from git history's v1
+  tool); superseded unrated LX1 twins of re-emitted seeds were parked in
+  `presets\latent\lx1_superseded\`, never deleted.
 - Same LCG spec as Bandit/Palettes (`licium_rng.h`, already refactored out
   and byte-verified) — seed → tree → emitted `.milk` must be byte-identical
   forever. GENVER bumps on any grammar/template/draw-order change.

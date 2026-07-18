@@ -12,8 +12,14 @@
 // can only produce legal scalar HLSL.
 //
 // ---------------------------------------------------------------------------
-// LX1 ID CONTRACT (fixed spec — any change here bumps LX1 -> LX2):
-//   * seed: 32 bits, ID printed as LX1-%08X.
+// LX2 ID CONTRACT (fixed spec — any change here bumps the genver again):
+//   * seed: 32 bits, ID printed as LX2-%08X.
+//   * LX1 -> LX2 (2026-07-18, Gary's multi-color request): PaletteOfSeed now
+//     advances deterministically to the next COLORFUL lib entry (two chromatic
+//     colors >= 60 deg apart in oklab hue, chroma >= 0.06), and the comp ramp
+//     grew to 4 stops (deep/s1/s2/accent). Grammar, screens, and the LCG
+//     stream are UNCHANGED — an LX1 id decodes to the same tree; only the
+//     dressing differs. LX1 .milk files on disk stay the archive of v1.
 //   * RNG: LiciumRng::Seed32(seed) (licium_rng.h — 0x9E3779B9 ^ seed*2654435761).
 //   * Draw order: (1) decay = F(0.960, 0.992); (2) the tree, grown by
 //     GrowNode: ONE class draw (Next16 % 100) then ONE kind draw per node,
@@ -37,7 +43,7 @@
 #include "../../vis_milk2/licium_oklab.h"
 #include "../../vis_milk2/licium_palette_lib.h"
 
-#define LX_GENVER      1
+#define LX_GENVER      2
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
 #define LX_MAX_NODES   4096     // pool bound (depth cap keeps real trees far under this)
 #define LX_MAX_DEPTH   6        // grammar depth cap (guardrail lives in the TEMPLATE anyway)
@@ -133,10 +139,43 @@ static int LensOfSeed(unsigned int seed)     // 0 sat(f)  1 sat(|f|)  2 sat(1-|f
     return (r < 45u) ? 0 : (r < 75u) ? 1 : 2;
 }
 
+// LX2: a palette qualifies only if it carries two genuinely chromatic colors
+// on distinct hues (oklab chroma >= 0.06, hue separation >= 60 deg) — tonal
+// and near-gray combos read as one color through the ramp and are skipped.
+static int PaletteIsColorful(int pi)
+{
+    const LiciumLibPalette* lp = &LICIUM_PAL_LIB[pi];
+    float hue[5];
+    int nh = 0;
+    for (int i = 0; i < lp->n && i < 5; i++)
+    {
+        float r = ((lp->c[i] >> 16) & 0xFF) / 255.0f;
+        float g = ((lp->c[i] >> 8)  & 0xFF) / 255.0f;
+        float b = ( lp->c[i]        & 0xFF) / 255.0f;
+        float L, a, bb;
+        LicSrgbToOklab(r, g, b, &L, &a, &bb);
+        if (sqrtf(a * a + bb * bb) < 0.06f) continue;   // gray-ish: no hue vote
+        hue[nh++] = atan2f(bb, a);
+    }
+    for (int i = 0; i < nh; i++)
+        for (int j = i + 1; j < nh; j++)
+        {
+            float d = fabsf(hue[i] - hue[j]);
+            if (d > 3.14159265f) d = 6.28318531f - d;
+            if (d >= 1.04719755f) return 1;             // >= 60 degrees apart
+        }
+    return 0;
+}
+
 static int PaletteOfSeed(unsigned int seed)
 {
     unsigned int h = (seed ^ 0x50414C45u) * 2246822519u;   // 'PALE'
-    return (int)((h >> 10) % (unsigned int)(sizeof(LICIUM_PAL_LIB) / sizeof(LICIUM_PAL_LIB[0])));
+    const int n = (int)(sizeof(LICIUM_PAL_LIB) / sizeof(LICIUM_PAL_LIB[0]));
+    int pi = (int)((h >> 10) % (unsigned int)n);
+    // LX2 multi-color guarantee: deterministic advance to the next colorful
+    // entry (the lib has many; this terminates long before wrapping).
+    for (int k = 0; k < n && !PaletteIsColorful(pi); k++) pi = (pi + 1) % n;
+    return pi;
 }
 
 // ---- CPU interpreter --------------------------------------------------------
@@ -426,13 +465,19 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         for (int j = i; j > 0 && LicSrgbLum(rgb[j]) < LicSrgbLum(rgb[j - 1]); j--)
             for (int c = 0; c < 3; c++)
             { float x = rgb[j][c]; rgb[j][c] = rgb[j - 1][c]; rgb[j - 1][c] = x; }
-    float deep[3], mid[3], accent[3], ink[3];
+    // LX2: FOUR ramp stops (deep + two interior thirds + accent) so the ramp
+    // traverses more of the palette's hues, not just its luminance ladder.
+    // For pn=3 both interior stops collapse to the middle color (graceful).
+    const int i1 = ((pn - 1) + 1) / 3;
+    const int i2 = (2 * (pn - 1) + 1) / 3;
+    float deep[3], s1[3], s2[3], accent[3], ink[3];
     for (int c = 0; c < 3; c++)
     {
         deep[c]   = rgb[0][c] * 0.30f;
-        mid[c]    = rgb[pn / 2][c];
+        s1[c]     = rgb[i1][c];
+        s2[c]     = rgb[i2][c];
         accent[c] = rgb[pn - 1][c];
-        ink[c]    = accent[c] * 0.75f + mid[c] * 0.25f;   // fresh injection reads bright
+        ink[c]    = accent[c] * 0.75f + s2[c] * 0.25f;    // fresh injection reads bright
     }
     float palMax = accent[0];
     if (accent[1] > palMax) palMax = accent[1];
@@ -522,11 +567,15 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         body.Raw("float sheen = pow(saturate(dot(nrm, lgt)), 2.5);\n");
         body.Raw("float dens = saturate(dot(c, lw) * 3.0);\n");
         _snprintf(l, sizeof(l) - 1,
-            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), saturate(dens*2.0));\n",
-            deep[0], deep[1], deep[2], mid[0], mid[1], mid[2]);
+            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), saturate(dens*3.0));\n",
+            deep[0], deep[1], deep[2], s1[0], s1[1], s1[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
-            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(dens*2.0 - 1.0));\n",
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(dens*3.0 - 1.0));\n",
+            s2[0], s2[1], s2[2]);
+        l[sizeof(l) - 1] = 0; body.Raw(l);
+        _snprintf(l, sizeof(l) - 1,
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(dens*3.0 - 2.0));\n",
             accent[0], accent[1], accent[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
