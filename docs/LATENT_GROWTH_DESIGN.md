@@ -65,6 +65,25 @@ So the core design choice (decision 1) is **where the learning acts:**
   frozen/black **−1**, blowout **−1.5** per link walked. (Weights are
   starting values; tuned against the first biased scan and recorded as doc
   amendments, L1-tuning convention.)
+- ***Amendment 2026-07-18 — the re-audition rule (Gary's, with live proof).***
+  A vote judges **formula × dressing**, not the formula: when the 20 good
+  batch-2 seeds were re-dressed LX1→LX2, 4 of Gary's 8 likes flipped to
+  passes and one pass flipped to a like — same expression strings, different
+  clothes, different verdicts. His stated wish: "the ones I vote no on get a
+  pass with another expression + test — stubs aren't a test of a string
+  working." So NO/pass votes are **soft on first audition**: (a) a formula
+  pass-voted in only ONE dressing enters the **re-audition queue** — the
+  next scan re-emits it with a re-rolled dressing (different palette
+  advance + re-rolled lens; medium too if decision 4 lands) alongside the
+  fresh haul, so it gets a second look in new clothes; (b) the pass
+  deposit (−0.5) lands only after a formula has been passed in **two**
+  different dressings; one audition = no negative deposit at all;
+  (c) a like in ANY audition counts fully (+3) and cancels the queue —
+  positives are the scarce signal and are never discounted. Re-audition
+  IDs carry a dressing-variant suffix (exact format settled at
+  implementation and recorded here; the seed part stays the pure 32-bit
+  formula id). Verdict-based deposits (alive/blowout/frozen) are about the
+  field itself and stay single-shot.
 - **Scoring:** passer's pheromone score = mean link weight along its
   chain, squashed; final rank = `raw_score × (1 + λ·pheromone)`, λ ≈ 0.5
   to start. A floor of unbiased picks is reserved (see next point).
@@ -144,3 +163,16 @@ cannot destabilize the app Gary uses.
    state; nothing to corrupt, evaporation emerges from later-wins votes).
    *Alternative:* a persistent pheromone file with explicit evaporation —
    classical ACO, but a second mutable source of truth to keep honest.
+4. ***(Added 2026-07-18)* Medium variety — "the land of swirls."** Gary,
+   after rating the whole batch-2 haul: every roll swirls, because the
+   scaffold's advection medium is a FIXED swirl — the exact failure mode
+   Bandit L1 paid for (one field formula → every roll the same comma-spiral;
+   fixed by rolling the archetype). RECOMMENDED: roll the MEDIUM from a
+   side-hash too (swirl / cell lattice / meandering stream / drift-weave,
+   the proven Bandit four), in this same milestone (it is emitter-side
+   dressing — the CPU screens judge the ink field and are untouched;
+   genver bumps once more, and re-auditions then re-roll medium as well,
+   which makes the second audition a genuinely different stage for the
+   same actor). *Alternative:* keep the fixed swirl for lineage stability
+   and take medium variety in a later pass — smaller step, but every scan
+   until then keeps auditioning every formula in the same swirling room.
