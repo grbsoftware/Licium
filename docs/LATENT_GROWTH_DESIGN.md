@@ -136,6 +136,27 @@ doc's ant-colony core made real:
   uniform coverage, or does it just breed comfortable sameness? The gate
   (previous section) protects Bandit either way.
 
+## The expedition mixer (Gary, 2026-07-18 — public-version concept, parked
+## here so it isn't lost; its own design pass later)
+
+Gamified compute allocation: the user points percentages of a scan budget
+at different search methods — "100% thread hunting," or "40 cold / 30
+swarm / 30 threads" with load balancing. Mechanically it is just a
+scheduler slicing the seed budget into sub-scans (each one an ordinary
+run: own lineage rules, own manifest, all determinism intact), so the
+engine cost is a UI, not a search rewrite. Why it's right for the public
+build: (a) it makes prospecting an identity (thread hunters, swarm
+riders, deep-field purists); (b) every user's allocation + like-rate is
+calibration data for the shipped default mix; (c) it IS the Bandit doc's
+parked "Expeditions" item — a named allocation + seed budget + results
+folder = an expedition. Symmetry worth keeping in the pitch: compute
+shares steer where the search LOOKS, the promotion gate's influence
+shares steer what findings may DO — allocation sliders at both ends of
+the pipeline. Needs: in-app launcher for the prospector (or embedding),
+progress UI, per-method result tagging in X. Design doc when its turn
+comes; the current cold/swarm/seek experiments are the data that
+calibrates it.
+
 ## What stays parked (explicitly not this milestone)
 
 Rank-side pheromone (superseded — generation-side swarm exists instead);
