@@ -72,6 +72,13 @@ const wchar_t* LatentGetNotesPath(void);
 // pre-filled with the next free seed from Licium\latent_search_ranges.txt.
 void LatentSearchDialog(HWND owner);
 
+// Progress for the GUI-launched search: polls the run's log and shows a corner
+// bar while scanning / when finished, and phase text in the window title
+// throughout. Draws NOTHING during the triage phase - those frames are being
+// photographed and measured (the 2026-07-18 stale-frame lesson: never let
+// instrumentation into the measurement). Engine calls it each UI pass.
+void LatentSearchOverlayRender(struct IDirect3DDevice9* dev, int w, int h);
+
 #ifdef __cplusplus
 }
 #endif

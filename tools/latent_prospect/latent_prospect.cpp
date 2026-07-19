@@ -1017,8 +1017,14 @@ int main(int argc, char** argv)
                     if ((seed & 0xFFFF) == 0xFFFF)
                     {
                         unsigned int d = done.fetch_add(0x10000) + 0x10000;
-                        if ((d & 0xFFFFF) == 0)             // every ~1M seeds
+                        if ((d & 0x3FFFF) == 0)             // every ~256K seeds
+                        {
                             printf("  ...~%u/%u scanned\n", d, count);
+                            // stdout is a pipe when the GUI runs us: without a
+                            // flush the CRT holds these lines until exit and
+                            // the progress bar has nothing to read.
+                            fflush(stdout);
+                        }
                     }
                 }
             }));

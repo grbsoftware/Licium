@@ -717,6 +717,18 @@ static unsigned long long NextFreeStart(void)
     return maxEnd;
 }
 
+// Progress state, fed by SearchPollLog() below and drawn by the overlay.
+enum { LS_IDLE = 0, LS_SCAN, LS_TRIAGE, LS_OPENING, LS_DONE, LS_FAILED };
+static HANDLE  g_searchProc = NULL;
+static int     g_searchEmit = 0;
+static wchar_t g_searchLogPath[MAX_PATH] = {0};
+static int     g_searchPhase   = LS_IDLE;
+static float   g_searchFrac    = 0.0f;
+static wchar_t g_searchText[80]  = {0};
+static wchar_t g_searchTitle[96] = {0};
+static DWORD   g_searchEndTick = 0;
+static int     g_searchPoll    = 0;
+
 static int LaunchSearch(unsigned long long start, unsigned long long count,
                         int emit, int threads, int swarm, int seek, int refresh)
 {
@@ -725,6 +737,9 @@ static int LaunchSearch(unsigned long long start, unsigned long long count,
 
     wchar_t logPath[MAX_PATH];
     swprintf(logPath, L"%slatent_search_last.log", g_plugin.m_szMilkdrop2Path);
+    // Fresh log per run: the overlay parses it for progress, and stale lines
+    // from a previous run would read as instant completion.
+    DeleteFileW(logPath);
 
     // -Command (not -File) so the run logs somewhere the user can check when a
     // search seems to vanish (e.g. the script's range-overlap guard threw).
@@ -744,7 +759,17 @@ static int LaunchSearch(unsigned long long start, unsigned long long count,
                         NULL, NULL, &si, &pi))
         return 0;
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+
+    // Keep the process handle: the overlay uses it to tell "still running with
+    // a quiet log" apart from "died without writing the completion line".
+    if (g_searchProc) CloseHandle(g_searchProc);
+    g_searchProc  = pi.hProcess;
+    g_searchEmit  = emit;
+    wcsncpy_s(g_searchLogPath, MAX_PATH, logPath, _TRUNCATE);
+    g_searchPhase = LS_SCAN;
+    g_searchFrac  = 0.0f;
+    wcscpy_s(g_searchText, L"search: starting");
+    g_searchEndTick = 0;
     return 1;
 }
 
@@ -809,6 +834,171 @@ extern "C" void LatentSearchDialog(HWND owner)
     // trade the menu bar already makes while a popup is tracking.
     DialogBoxParamW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_LATENT_SEARCH),
                     owner, SearchDlgProc, 0);
+}
+
+// ==================== search progress (overlay + title) ======================
+// The launched script logs UTF-16LE (PowerShell *>> to the fresh file); the
+// prospector inside it flushes a "...~a/b scanned" line every ~256K seeds and
+// the triage phase writes one "... mean=" line per verdicted roll, so the log
+// tail is a complete progress feed. Polled every ~30 frames.
+
+// The live main hwnd, stashed by the host on every window (re)creation
+// (CPluginShell's own accessor is protected).
+extern "C" HWND HostGetMainWnd(void);
+
+// Find the LAST occurrence of needle (wcsstr finds the first).
+static const wchar_t* LastOccur(const wchar_t* hay, const wchar_t* needle)
+{
+    const wchar_t *found = NULL, *p = hay;
+    while ((p = wcsstr(p, needle)) != NULL) { found = p; p++; }
+    return found;
+}
+
+static void SearchPollLog(void)
+{
+    if (g_searchPhase == LS_IDLE || g_searchPhase == LS_DONE || g_searchPhase == LS_FAILED)
+        return;
+
+    // Tail of the log, decoded to a wide string. UTF-16LE when the BOM says so
+    // (the normal case - we delete the log before launch and PowerShell recreates
+    // it Unicode); raw bytes widened otherwise.
+    static wchar_t txt[8192];
+    int n = 0;
+    HANDLE f = CreateFileW(g_searchLogPath, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE)
+    {
+        static unsigned char raw[16384];
+        DWORD size = GetFileSize(f, NULL);
+        DWORD take = (size > sizeof(raw)) ? sizeof(raw) : size;
+        SetFilePointer(f, size - take, NULL, FILE_BEGIN);
+        DWORD got = 0;
+        ReadFile(f, raw, take, &got, NULL);
+        CloseHandle(f);
+
+        unsigned char* p = raw;
+        if (got >= 2 && ((raw[0] == 0xFF && raw[1] == 0xFE) || size > take))
+        {
+            // UTF-16LE (skip BOM / realign an odd tail-split to wchar pairs)
+            DWORD ofs = (raw[0] == 0xFF && raw[1] == 0xFE) ? 2 : (got & 1);
+            for (DWORD i = ofs; i + 1 < got && n < 8190; i += 2)
+            {
+                wchar_t c = (wchar_t)(raw[i] | (raw[i + 1] << 8));
+                txt[n++] = c ? c : L' ';
+            }
+        }
+        else
+            for (DWORD i = 0; i < got && n < 8190; i++)
+                txt[n++] = (wchar_t)raw[i];
+    }
+    txt[n] = 0;
+
+    if (LastOccur(txt, L"search complete"))
+    {
+        g_searchPhase = LS_DONE; g_searchFrac = 1.0f;
+        wcscpy_s(g_searchText, L"search done - haul is in X");
+        if (!g_searchEndTick) g_searchEndTick = GetTickCount();
+        return;
+    }
+    if (LastOccur(txt, L"overlaps already-searched") || LastOccur(txt, L"Exception") ||
+        (g_searchProc && WaitForSingleObject(g_searchProc, 0) == WAIT_OBJECT_0))
+    {
+        g_searchPhase = LS_FAILED;
+        wcscpy_s(g_searchText, L"search FAILED - see latent_search_last.log");
+        if (!g_searchEndTick) g_searchEndTick = GetTickCount();
+        return;
+    }
+    if (LastOccur(txt, L"PHASE C"))
+    {
+        g_searchPhase = LS_OPENING; g_searchFrac = 1.0f;
+        wcscpy_s(g_searchText, L"search: opening X");
+        return;
+    }
+    const wchar_t* phaseB = LastOccur(txt, L"PHASE B");
+    if (phaseB)
+    {
+        int done = 0;
+        for (const wchar_t* p = phaseB; (p = wcsstr(p, L" mean=")) != NULL; p++) done++;
+        g_searchPhase = LS_TRIAGE;
+        g_searchFrac  = (g_searchEmit > 0 && done < g_searchEmit)
+                        ? (float)done / g_searchEmit : 1.0f;
+        swprintf(g_searchText, L"search: triage %d/%d", done, g_searchEmit);
+        return;
+    }
+    const wchar_t* tick = LastOccur(txt, L"...~");
+    if (tick)
+    {
+        unsigned long long a = 0, b = 0;
+        if (swscanf(tick, L"...~%llu/%llu", &a, &b) == 2 && b > 0)
+        {
+            g_searchPhase = LS_SCAN;
+            g_searchFrac  = (float)((double)a / (double)b);
+            swprintf(g_searchText, L"search: scanning %d%%", (int)(g_searchFrac * 100.0f));
+        }
+    }
+    // no markers yet: keep "search: starting"
+}
+
+extern "C" void LatentSearchOverlayRender(IDirect3DDevice9* dev, int w, int h)
+{
+    if (g_searchPhase == LS_IDLE) return;
+
+    if (++g_searchPoll >= 30) { g_searchPoll = 0; SearchPollLog(); }
+
+    // done/failed linger, then clean up (title restored below on the way out)
+    if (g_searchEndTick &&
+        GetTickCount() - g_searchEndTick > (DWORD)(g_searchPhase == LS_DONE ? 6000 : 15000))
+    {
+        g_searchPhase = LS_IDLE; g_searchFrac = 0.0f; g_searchText[0] = 0;
+        g_searchEndTick = 0;
+        if (g_searchProc) { CloseHandle(g_searchProc); g_searchProc = NULL; }
+    }
+
+    // Window title carries the phase through ALL phases (it is outside the
+    // canvas, so it never lands in a measured frame).
+    wchar_t want[96];
+    if (g_searchPhase != LS_IDLE) swprintf(want, L"Licium - %s", g_searchText);
+    else                          wcscpy_s(want, L"Licium");
+    if (wcscmp(want, g_searchTitle) != 0)
+    {
+        wcscpy_s(g_searchTitle, want);
+        HWND main = HostGetMainWnd();
+        if (main) SetWindowTextW(main, want);
+    }
+
+    // The bar itself: scanning and the end states only. During triage/opening
+    // the canvas is being photographed and measured - nothing may draw on it.
+    if (g_searchPhase != LS_SCAN && g_searchPhase != LS_DONE && g_searchPhase != LS_FAILED)
+        return;
+    if (!dev || w <= 0 || h <= 0) return;
+
+    dev->SetVertexShader(NULL);
+    dev->SetPixelShader(NULL);
+    dev->SetFVF(LAT_VERTEX_FORMAT);
+    dev->SetTexture(0, NULL);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+
+    float bw = 230.0f, bh = 36.0f, mgn = 10.0f;
+    float x0 = w - mgn - bw, y0 = h - mgn - bh;
+    LatRect(dev, w, h, x0, y0, x0 + bw, y0 + bh, 0xD8000000);
+    LatText(g_searchText, (int)x0 + 8, (int)y0 + 3, (int)(x0 + bw) - 4, (int)y0 + 20,
+            g_searchPhase == LS_FAILED ? 0xFFFF6060 : 0xFFFFFFFF);
+    float bx0 = x0 + 8, bx1 = x0 + bw - 8, by0 = y0 + bh - 12, by1 = y0 + bh - 6;
+    LatRect(dev, w, h, bx0, by0, bx1, by1, 0xFF303030);
+    if (g_searchFrac > 0.0f)
+        LatRect(dev, w, h, bx0, by0, bx0 + (bx1 - bx0) * g_searchFrac, by1,
+                g_searchPhase == LS_FAILED ? 0xFFB03030 : 0xFF30C060);
+
+    dev->SetRenderState(D3DRS_ZENABLE, TRUE);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 }
 
 #endif // MILKDROP_STANDALONE

@@ -598,6 +598,10 @@ extern "C" HMENU HostBuildMenuBar(void)
 static HWND    g_hostMainWnd = 0;
 static wchar_t g_hostIniFile[MAX_PATH] = { 0 };
 
+// The live main hwnd for tool code that runs outside CPluginShell (the shell's
+// own accessor is protected): e.g. the latent search overlay's title updates.
+extern "C" HWND HostGetMainWnd(void) { return g_hostMainWnd; }
+
 extern "C" void HostOnWindowCreated(HWND hwnd, int windowed, const wchar_t *iniFile)
 {
     g_hostMainWnd = hwnd;

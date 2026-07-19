@@ -4401,6 +4401,9 @@ void CPlugin::MyRenderUI(
     // Latent browser: side-panel modal, same idiom (yields while the engine's
     // waitstring is up for a description).
     LatentBrowserRender(GetDevice(), GetWidth(), GetHeight());
+    // Latent search progress: title text in every phase; the corner bar only
+    // while the canvas is not being measured (triage photographs these frames).
+    LatentSearchOverlayRender(GetDevice(), GetWidth(), GetHeight());
 #endif
 
     // 1. render text in upper-right corner - EXCEPT USER MESSAGE - it goes last b/c it draws a box under itself
