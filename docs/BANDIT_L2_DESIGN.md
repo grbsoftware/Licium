@@ -57,7 +57,8 @@ ramp still rules everything (palette discipline holds).
 
 Knob additions (appended to the L1 draw order — L1 knobs keep their
 positions; GENVER bumps to L2 anyway): actor count (1–3), actor decay,
-actor inject gain (equilibrium-scaled), actor motion pattern, atmosphere
+actor inject gain (equilibrium-scaled), actor motion pattern (child-spiral
+planting is one of these — see the spiral family), atmosphere
 strength, layer-blend weights. Exact ranges settled at implementation
 against live grabs, recorded in the doc as amendments (L1 tuning
 convention).
@@ -75,9 +76,35 @@ New rolled draws (Gary's wishlist, 2026-07-17):
 - **Field scale** — the lattice/archetype cell size becomes a knob
   (squares small or large; also scales the other archetypes' feature
   size).
-- **Child spirals** — a second, smaller spiral term whose centers ride the
-  parent spiral's spine (parameterized along the winding), rolled on/off
-  with its own scale/rate. Spirals growing ON spirals.
+- **Child spirals (fractal law — refined by Gary, 2026-07-18)** — like a
+  fractal: the child's pull starts at the trunk, 90 degrees off the parent,
+  and smaller. Gary's physics doubt is correct AND resolvable: the visible
+  arm is not a backbone — it is ink stretched by wind, nothing to hang a
+  child on. But the TRUNK is analytic: the parent swirl's center, rate, and
+  phase are rolled knobs, so the ideal streamline (the log-spiral locus the
+  arm forms along) is computable without ever being drawn. Children are
+  planted AT computed points along that locus — smaller by a rolled ratio
+  (~0.25–0.4), each oriented 90° to the local arm tangent so its wind
+  CROSSES the parent arm instead of following it (crisscross by
+  construction).
+  - **Layer law (the part that makes it work — Gary's call):** children do
+    NOT join the parent's field. Same-field children fight the parent's
+    wind and shred the arm into domain walls — square-lock IS that
+    mechanism, and it stays where it belongs (lattice). Children live on
+    **buf1, the actors layer**, as their own wind field seeded from the
+    parent's analytic geometry (deterministic: same seed, same planting
+    points), composited over buf0. Consequence: *child spirals is an actor
+    motion pattern, not a medium change* — this item and the layered
+    composition are one mechanism.
+  - **Color law (Gary): each child generation is palette-advanced one
+    stop.** The child layer samples the SAME ramp shifted +1 (child deep =
+    parent's first interior stop, wrapping toward accent), so parent and
+    child harmonize by construction and generations read at a glance. One
+    ramp still rules everything (palette discipline holds).
+  - **Depth:** v1 ships fractal depth 1 (parent + children). Grandchildren
+    are the same planting law applied recursively inside buf1; field cost
+    is linear in total center count, so any future depth-2 gates on a total
+    center cap (~12), not on depth. Parked until depth-1 is seen live.
 - **Axis mirror** — the field is optionally composed with its mirror
   across one axis (x, y, or a rolled diagonal): `f(uv) + f(mirror(uv))`.
   Opposing winds meet at the mirror line — more of the domain-wall
