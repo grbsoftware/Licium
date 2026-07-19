@@ -17,7 +17,11 @@
 
 param(
     [int]$Limit = 0,
-    [switch]$KeepOpen
+    [switch]$KeepOpen,
+    # re-triage ids matching this regex even if they already have verdicts
+    # (verdict lines are later-wins, so the new line simply outranks the old —
+    # added after the 2026-07-18 compile-stall poisoned 48 verdicts)
+    [string]$Redo = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +47,7 @@ Add-Type -Name W -Namespace LT -MemberDefinition @'
 public delegate bool EnumProc(IntPtr h, IntPtr l);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
 [StructLayout(LayoutKind.Sequential)] public struct COPYDATASTRUCT { public IntPtr dwData; public int cbData; public IntPtr lpData; }
@@ -133,7 +138,7 @@ function Diff-Lums($A, $B) {
 # Quick look at one loaded roll: settle, two grabs 1.5s apart.
 function Judge([string]$Prefix) {
     $pngs = Grab-Frames $Prefix 2 1500
-    if ($pngs.Count -lt 2) { return @{ Verdict = "grabfail"; Mean = 0 } }
+    if ($pngs.Count -lt 2) { return @{ Verdict = "grabfail"; Mean = 0; Motion = 0 } }
     $a = Measure-Png $pngs[0].FullName
     $b = Measure-Png $pngs[1].FullName
     $motion = Diff-Lums $a.Lums $b.Lums
@@ -154,8 +159,12 @@ if (Test-Path $Verdicts) {
     }
 }
 
+# LX\w+ not LX\d+: lineages may carry letters (LXS1 swarm rolls).
+# -Redo: ids matching the regex re-triage even when already verdicted — the
+# new line simply outranks the old (later-wins), no manual line surgery.
 $rolls = @(Get-ChildItem "$RollsDir\latent_LX*.milk" -ErrorAction SilentlyContinue | Sort-Object Name |
-    Where-Object { $_.BaseName -match 'latent_(LX\d+-[0-9A-F]{8})' -and -not $already.ContainsKey($Matches[1]) })
+    Where-Object { $_.BaseName -match 'latent_(LX\w+-[0-9A-F]{8})' -and
+        ((-not $already.ContainsKey($Matches[1])) -or ($Redo -ne "" -and $Matches[1] -match $Redo)) })
 if ($Limit -gt 0 -and $rolls.Count -gt $Limit) { $rolls = $rolls[0..($Limit - 1)] }
 if ($rolls.Count -eq 0) { Write-Host "nothing untriaged in $RollsDir"; return }
 Write-Host "triage: $($rolls.Count) untriaged roll(s)"
@@ -163,10 +172,22 @@ Write-Host "triage: $($rolls.Count) untriaged roll(s)"
 $procId = Start-Licium
 $main = Get-MainWindow ([uint32]$procId)
 
+# A minimized window stops presenting, so Spout re-serves the last frame and
+# every grab is identical — restore before judging anything.
+if ([LT.W]::IsIconic($main)) {
+    [LT.W]::PostMessageW($main, 0x0112, [IntPtr]0xF120, [IntPtr]0) | Out-Null  # WM_SYSCOMMAND SC_RESTORE
+    Start-Sleep -Seconds 2
+}
+
 $results = @()
+$streakMean = -1.0; $streak = 0
 foreach ($roll in $rolls) {
-    $null = $roll.BaseName -match 'latent_(LX\d+-[0-9A-F]{8})'
+    $null = $roll.BaseName -match 'latent_(LX\w+-[0-9A-F]{8})'
     $id = $Matches[1]
+    # Purge this id's grabs from any earlier run: the sheet and any human
+    # eyeball must only ever see THIS run's frames (leftover _s files from an
+    # aborted run once made 44 healthy verdicts look like identical clones).
+    Get-ChildItem "$OutDir\$id`_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force -Confirm:$false
     $rc = [LT.W]::LoadPreset($main, $roll.FullName)
     if ($rc -ne 1) {
         $res = @{ Verdict = "loadfail"; Mean = 0; Motion = 0 }
@@ -189,6 +210,15 @@ foreach ($roll in $rolls) {
     Add-Content -Path $Verdicts -Value $line -Encoding ascii
     Write-Host ("  {0}  {1}  mean={2:0.000} motion={3:0.0000}" -f $id, $res.Verdict, $res.Mean, $res.Motion)
     $results += @{ Id = $id; Verdict = $res.Verdict }
+    # Distinct rolls cannot agree on mean to 4 decimals with zero motion — a
+    # streak of them means the grabber is photographing one stale frame
+    # (minimized window, held splash, blocked message pump...). Abort loudly
+    # rather than mass-produce false verdicts; the streak's lines need manual
+    # removal from the verdicts file before a re-run will revisit those ids.
+    if (('{0:0.0000}' -f [double]$res.Mean) -eq ('{0:0.0000}' -f $streakMean) -and [double]$res.Motion -lt 0.0005) {
+        $streak++
+        if ($streak -ge 4) { throw "STALE-FRAME GUARD: $($streak+1) consecutive identical verdicts (mean=$('{0:0.0000}' -f $streakMean), motion~0). Renderer is not presenting. Last ids: $(($results | Select-Object -Last ($streak+1) | ForEach-Object { $_.Id }) -join ', ')" }
+    } else { $streakMean = [double]$res.Mean; $streak = 0 }
 }
 
 # ---- contact sheet (stamped: id + verdict under each tile) ------------------
@@ -204,7 +234,7 @@ if ($results.Count -gt 0) {
     for ($i = 0; $i -lt $results.Count; $i++) {
         $r = $results[$i]
         $x = ($i % $cols) * $tileW; $y = [math]::Floor($i / $cols) * ($tileH + $label)
-        $png = @(Get-ChildItem "$OutDir\$($r.Id)_*.png" | Sort-Object Name | Select-Object -Last 1)
+        $png = @(Get-ChildItem "$OutDir\$($r.Id)_*.png" | Sort-Object LastWriteTime | Select-Object -Last 1)
         if ($png.Count -gt 0) {
             $tile = [System.Drawing.Bitmap]::new($png[0].FullName)
             $g.DrawImage($tile, [System.Drawing.Rectangle]::new($x, $y, $tileW, $tileH))
