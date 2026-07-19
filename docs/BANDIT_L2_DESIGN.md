@@ -105,10 +105,18 @@ New rolled draws (Gary's wishlist, 2026-07-17):
     are the same planting law applied recursively inside buf1; field cost
     is linear in total center count, so any future depth-2 gates on a total
     center cap (~12), not on depth. Parked until depth-1 is seen live.
-- **Axis mirror** — the field is optionally composed with its mirror
-  across one axis (x, y, or a rolled diagonal): `f(uv) + f(mirror(uv))`.
-  Opposing winds meet at the mirror line — more of the domain-wall
-  behavior Gary likes, by construction.
+- **Symmetry twin (mirror OR 180° — refined by Gary, 2026-07-18)** — the
+  field is optionally composed with a transformed copy of itself, and the
+  transform is itself a rolled draw with two physically distinct variants:
+  - *Reflection* across x, y, or a rolled diagonal:
+    `f(uv) + f(mirror(uv))`. Reflection REVERSES winding, so the twin's
+    wind opposes the parent's — domain walls at the mirror line by
+    construction (the square-lock texture Gary likes).
+  - *180° rotation, trunk to trunk*: `f(uv) + f(2c - uv)` about a rolled
+    center c, placed so the twin's trunk faces the parent's across c.
+    Rotation PRESERVES winding — a co-rotating yin-yang pair whose seam
+    SHEARS instead of walling. Not a flip: same chirality, different seam
+    behavior, reads differently. Both variants stay in the pool.
 
 All three are draws, not constants (variety lesson), appended in fixed
 documented order.
