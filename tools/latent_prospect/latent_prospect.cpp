@@ -46,7 +46,7 @@
 #include "../../vis_milk2/licium_oklab.h"
 #include "../../vis_milk2/licium_palette_lib.h"
 
-#define LX_GENVER      2
+#define LX_GENVER      3
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
 #define LX_MAX_NODES   4096     // pool bound (depth cap keeps real trees far under this)
 #define LX_MAX_DEPTH   6        // grammar depth cap (guardrail lives in the TEMPLATE anyway)
@@ -631,6 +631,29 @@ static void EmitShaderLinesSplit(Str* out, const char* prefix, const char* body)
     }
 }
 
+// ---- rung 1 (LX3, 2026-07-19): the medium is rolled, not fixed --------------
+// Gary's n=273 readout on LX2 ("every single one spirals in the same
+// direction"): the grammar only ever decorated ONE hard-coded swirl field.
+// A side-hash of the seed (never the tree's LCG stream — same seed still
+// grows the same formula as LX2) now picks the velocity archetype, field
+// scale, tempo, and spin direction: 4*3*3*2 = 72 mediums. The archetypes are
+// Bandit's four divergence-free curls (vel = (dphi/dy, -dphi/dx)) — the
+// af6df86 variety lesson, applied to Latent's scaffold.
+static void MediumOfSeed(unsigned int seed, int* arche, float* scale,
+                         float* speed, float* dir)
+{
+    unsigned int mh = (seed ^ 0x4D454431u) * 2654435761u;   // 'MED1' salt
+    *arche = (int)((mh >> 3) & 3);
+    *scale = 1.30f + 1.25f * (float)((mh >> 5) % 3);        // 1.30 2.55 3.80
+    *speed = 0.12f + 0.11f * (float)((mh >> 7) % 3);        // 0.12 0.23 0.34
+    *dir   = ((mh >> 9) & 1) ? 1.0f : -1.0f;
+}
+static const char* MediumName(int arche)
+{
+    static const char* names[4] = { "swirl", "lattice", "stream", "driftweave" };
+    return names[arche & 3];
+}
+
 static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
 {
     const int lens = LensOfSeed(seed);
@@ -710,7 +733,43 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         if (lens == 0)      body.Raw("f = saturate(f);\n");
         else if (lens == 1) body.Raw("f = saturate(abs(f));\n");
         else                body.Raw("f = saturate(1.0 - abs(f));\n");
-        body.Raw("float2 vel = float2(-2.3*sin(p.y*2.3 + tt*1.7), 2.1*sin(p.x*2.1 - tt*1.3));\n");
+        {
+            int arche; float fscale, fspeed, fdir;
+            MediumOfSeed(seed, &arche, &fscale, &fspeed, &fdir);
+            char l[256];
+            _snprintf(l, sizeof(l) - 1, "float tm = time * %.5f;\nfloat fa = %.5f;\n",
+                      fspeed, fscale);
+            l[sizeof(l) - 1] = 0;
+            body.Raw(l);
+            switch (arche)
+            {
+            default:
+            case 0: // SWIRL — one dominant rotation cell (the LX2 medium's family)
+                body.Raw("float s1 = sin(p.x*fa + tm), c1 = cos(p.x*fa + tm);\n"
+                         "float s2 = sin(p.y*fa*0.8 - tm*0.7), c2 = cos(p.y*fa*0.8 - tm*0.7);\n"
+                         "float c3 = cos((p.x + p.y)*fa*0.6 + tm*1.3);\n"
+                         "float dphidx = fa*c1*c2 + 0.3*fa*c3;\n"
+                         "float dphidy = -fa*0.8*s1*s2 + 0.3*fa*c3;\n");
+                break;
+            case 1: // LATTICE — counter-rotating cells, dye weaves between them
+                body.Raw("float dphidx = fa*cos(p.x*fa + tm)*sin(p.y*fa - tm*0.8);\n"
+                         "float dphidy = fa*sin(p.x*fa + tm)*cos(p.y*fa - tm*0.8);\n");
+                break;
+            case 2: // STREAM — meandering horizontal jet, vertical wander
+                body.Raw("float dphidx = -0.2*fa*sin(p.x*fa*0.5 + tm*0.8);\n"
+                         "float dphidy = -1.8*fa*sin(p.y*fa*1.5 - tm);\n");
+                break;
+            case 3: // DRIFT-WEAVE — the lattice plus steady linear drift
+                body.Raw("float dphidx = 0.6*fa*cos(p.x*fa + tm)*sin(p.y*fa - tm*0.8) + 1.1;\n"
+                         "float dphidy = 0.6*fa*sin(p.x*fa + tm)*cos(p.y*fa - tm*0.8);\n");
+                break;
+            }
+            // /fa: tempo must not ride the cell size; *fdir: mirrored spin twin
+            _snprintf(l, sizeof(l) - 1,
+                      "float2 vel = float2(dphidy, -dphidx) * %.5f;\n", 2.2f * fdir / fscale);
+            l[sizeof(l) - 1] = 0;
+            body.Raw(l);
+        }
         body.Raw("float2 suv = uv - vel * 0.0035;\n");
         body.Raw("float3 prev = tex2D(sampler_buf0, suv).xyz;\n");
         {
@@ -933,7 +992,13 @@ int main(int argc, char** argv)
         int pass = ScreenCandidate(&t, LensOfSeed(single), decay, &r);
         char path[1024];
         if (!EmitRollFile(single, outdir, path, sizeof(path))) { printf("emit failed\n"); return 1; }
-        printf("LX%d-%08X  nodes=%d  screen=%s", LX_GENVER, single, t.count, pass ? "PASS" : "reject");
+        {
+            int arche; float fscale, fspeed, fdir;
+            MediumOfSeed(single, &arche, &fscale, &fspeed, &fdir);
+            printf("LX%d-%08X  medium=%s a=%.2f spd=%.2f dir=%c  nodes=%d  screen=%s",
+                   LX_GENVER, single, MediumName(arche), fscale, fspeed,
+                   (fdir > 0) ? '+' : '-', t.count, pass ? "PASS" : "reject");
+        }
         if (pass) printf("  score=%.4f dance=%.4f", r.score, r.dance);
         printf("\n  emitted (forced): %s\n", path);
         return 0;
