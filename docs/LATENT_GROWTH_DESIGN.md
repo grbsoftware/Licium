@@ -205,6 +205,32 @@ mutations; the Modes dropdown; the taste model
 5. Live: a doped Bandit session for Gary — the acceptance test is that
    rolls surface promoted behaviors at a noticeable-but-not-dominant rate.
 
+## Three-haul experiment result (2026-07-18 night — evidence, not a decision)
+
+Gary rated the full staged experiment in X (all rolls voted). Like-rates:
+**cold 7/55 (12.7%) · thread-seek 6/40 (15.0%) · swarm 3/40 (7.5%)**.
+Sample sizes are small; seek-vs-cold is within noise, but swarm at half
+the cold rate leans the same way as the architecture pivot (cold
+prospector forever; generation-side pheromone stays parked).
+
+The dominant finding is qualitative, in Gary's words: **"all have the
+same behaviors — I just rated Y on the ones that didn't bloom or go
+dark."** Read: with the scaffold's fixed swirl medium, every roll
+BEHAVES identically; formula differences surface as texture/color only,
+so taste cannot yet distinguish search methods — it can only reward
+long-horizon stability. Two consequences feed the decisions below:
+
+1. **Decision 3 (medium variety) just gained live evidence** — behavior
+   variety is the bottleneck, not look variety (the corrected cold
+   contact sheet is visually diverse; the behaviors still rhyme).
+2. **Phase-B upgrade candidate (rank-side, free iteration):** his
+   like-criterion — survives without blowing out or fading — is
+   machine-checkable. Give ALIVE rolls the same 40s second look that
+   failures get; if mean luminance drifts to either extreme, verdict
+   `fader`/`bloomer` (labels, never deletions). That folds the one
+   thing his votes currently measure into Phase B, freeing future
+   votes to measure taste.
+
 ## Decisions for Gary (bless or amend)
 
 1. **Gate numbers** — RECOMMENDED: `G = 25%` guest share, equal split with
