@@ -935,7 +935,28 @@ static void SearchPollLog(void)
             g_searchPhase = LS_SCAN;
             g_searchFrac  = (float)((double)a / (double)b);
             swprintf(g_searchText, L"search: scanning %d%%", (int)(g_searchFrac * 100.0f));
+            return;   // harvest lines linger in the tail; real ticks outrank them
         }
+    }
+    // Phase 0 (queue-leftover harvest) — only reached before the first scan
+    // tick. LS_TRIAGE keeps it title-only: harvest triage measures the canvas
+    // too, so the corner bar must stay out of the frame.
+    if (LastOccur(txt, L"HARVEST done"))
+    {
+        g_searchPhase = LS_SCAN; g_searchFrac = 0.0f;
+        wcscpy_s(g_searchText, L"search: early haul in X - scanning");
+        return;
+    }
+    const wchar_t* hv = LastOccur(txt, L"HARVEST:");
+    if (hv)
+    {
+        int total = 0, done = 0;
+        swscanf(hv, L"HARVEST: top %d", &total);
+        for (const wchar_t* p = hv; (p = wcsstr(p, L" mean=")) != NULL; p++) done++;
+        g_searchPhase = LS_TRIAGE;
+        if (total > 0) swprintf(g_searchText, L"search: early haul %d/%d", done, total);
+        else           wcscpy_s(g_searchText, L"search: checking queue leftovers");
+        return;
     }
     // no markers yet: keep "search: starting"
 }
