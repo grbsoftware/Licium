@@ -57,20 +57,39 @@ for ($i = 0; $i -lt $alloc.Count; $i++) {
     $m = $alloc[$i][0]; $p = $alloc[$i][1]
     $slice  = [uint32][math]::Floor($Budget * $p / 100)
     if ($i -eq $alloc.Count - 1) { $slice = $Start + $Budget - $cursor }   # remainder
-    $cores  = [math]::Max(1, [math]::Floor($Cores * $p / 100))
-    $emit   = [math]::Max(1, [math]::Floor($Emit * $p / 100))
-    $args = "--start $cursor --count $slice --emit $emit --threads $cores --outdir `"$OutDir`""
+    # NOTE: PS variables are case-INSENSITIVE — these must not be named
+    # $cores/$emit or they overwrite the $Cores/$Emit params (bug found on
+    # the first real run: slice 2 ran with slice 1's leftovers).
+    $sliceCores = [math]::Max(1, [math]::Floor($Cores * $p / 100))
+    $sliceEmit  = [math]::Max(1, [math]::Floor($Emit * $p / 100))
+    $args = "--start $cursor --count $slice --emit $sliceEmit --threads $sliceCores --outdir `"$OutDir`""
     if ($m -eq "swarm" -or $m -eq "swarmthreads")   { $args += " --swarm `"$StateDir`"" }
     if ($m -eq "threads" -or $m -eq "swarmthreads") { $args += " --seek threads" }
+    # each slice gets a PRIVATE outdir: concurrent processes appending the
+    # same queue.jsonl could interleave mid-line (the archive is forever -
+    # no roulette). Files are merged into $OutDir after all slices finish.
+    $sliceDir = Join-Path $env:TEMP ("expedition_" + $m + "_" + $cursor)
+    New-Item -ItemType Directory -Force $sliceDir | Out-Null
+    $args = $args -replace [regex]::Escape("--outdir `"$OutDir`""), "--outdir `"$sliceDir`""
     $log = Join-Path $env:TEMP ("expedition_" + $m + "_" + $cursor + ".log")
-    Write-Host ("{0,-12} seeds [{1}..{2})  cores={3}  emit={4}" -f $m, $cursor, ($cursor + $slice), $cores, $emit)
+    Write-Host ("{0,-12} seeds [{1}..{2})  cores={3}  emit={4}" -f $m, $cursor, ($cursor + $slice), $sliceCores, $sliceEmit)
     $proc = Start-Process -FilePath $exe -ArgumentList $args -NoNewWindow -PassThru `
             -RedirectStandardOutput $log
-    $jobs += ,@($m, $proc, $log)
+    $jobs += ,@($m, $proc, $log, $sliceDir)
     $cursor += $slice
 }
 
 foreach ($j in $jobs) { $j[1].WaitForExit() }
+
+# merge: rolls + manifests move to $OutDir; each slice's queue lines append
+# whole (single writer now = no interleave risk)
+foreach ($j in $jobs) {
+    $sd = $j[3]
+    Get-ChildItem "$sd\*.milk" -ErrorAction SilentlyContinue | Move-Item -Destination $OutDir -Force
+    Get-ChildItem "$sd\swarm_manifest_*" -ErrorAction SilentlyContinue | Move-Item -Destination $OutDir -Force
+    $q = Join-Path $sd "queue.jsonl"
+    if (Test-Path $q) { Add-Content -Path (Join-Path $OutDir "queue.jsonl") -Value (Get-Content $q) }
+}
 Write-Host "`n== expedition report =="
 foreach ($j in $jobs) {
     $last = Get-Content $j[2] -ErrorAction SilentlyContinue | Where-Object { $_ -match "^scan \[" } | Select-Object -Last 1
