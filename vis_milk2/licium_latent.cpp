@@ -671,4 +671,144 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 }
 
+// ========================= Latent > Run search... ============================
+// GUI front end for tools\latent_search.ps1 (scan -> triage -> X refresh).
+// The dialog collects the script's parameters and launches it DETACHED so the
+// search outlives this process; the script's final phase posts WM_LICIUM_LATENT
+// back at the main window, which is how X ends up holding the fresh haul.
+
+#include "licium_res.h"
+
+// The repo root is two levels above the exe (vis_milk2\Release\Licium.exe) —
+// vendored-tree layout law. Returns 0 if the script isn't found there.
+static int ResolveSearchScript(wchar_t* out /*MAX_PATH*/)
+{
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    for (int hop = 0; hop < 3; hop++)   // strip Licium.exe, Release, vis_milk2
+    {
+        wchar_t* slash = wcsrchr(exe, L'\\');
+        if (!slash) return 0;
+        *slash = 0;
+    }
+    swprintf(out, L"%s\\tools\\latent_search.ps1", exe);
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Pre-fill for the Start field: one past the highest seed any prior search
+// consumed (the script appends every run's range to latent_search_ranges.txt
+// and refuses overlaps — this makes the default always pass that guard).
+static unsigned long long NextFreeStart(void)
+{
+    wchar_t path[MAX_PATH];
+    swprintf(path, L"%slatent_search_ranges.txt", g_plugin.m_szMilkdrop2Path);
+    unsigned long long maxEnd = 0;
+    FILE* f = _wfopen(path, L"rt");
+    if (f)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), f))
+        {
+            unsigned long long a = 0, b = 0;
+            if (sscanf(line, "%llu %llu", &a, &b) == 2 && b > maxEnd) maxEnd = b;
+        }
+        fclose(f);
+    }
+    return maxEnd;
+}
+
+static int LaunchSearch(unsigned long long start, unsigned long long count,
+                        int emit, int threads, int swarm, int seek, int refresh)
+{
+    wchar_t script[MAX_PATH];
+    if (!ResolveSearchScript(script)) return 0;
+
+    wchar_t logPath[MAX_PATH];
+    swprintf(logPath, L"%slatent_search_last.log", g_plugin.m_szMilkdrop2Path);
+
+    // -Command (not -File) so the run logs somewhere the user can check when a
+    // search seems to vanish (e.g. the script's range-overlap guard threw).
+    wchar_t cmd[2048];
+    swprintf(cmd, L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                  L"\"& '%s' -Start %llu -Count %llu -Emit %d -Threads %d%s%s%s *>> '%s'\"",
+             script, start, count, emit, threads,
+             swarm   ? L" -Swarm"        : L"",
+             seek    ? L" -Seek threads" : L"",
+             refresh ? L""               : L" -NoRefresh",
+             logPath);
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                        NULL, NULL, &si, &pi))
+        return 0;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 1;
+}
+
+static INT_PTR CALLBACK SearchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        wchar_t buf[32];
+        swprintf(buf, L"%llu", NextFreeStart());
+        SetDlgItemTextW(dlg, IDC_LS_START,   buf);
+        SetDlgItemTextW(dlg, IDC_LS_COUNT,   L"1000000");
+        SetDlgItemTextW(dlg, IDC_LS_EMIT,    L"40");
+        SetDlgItemTextW(dlg, IDC_LS_THREADS, L"10");
+        CheckDlgButton(dlg, IDC_LS_REFRESH, BST_CHECKED);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case IDOK:
+        {
+            wchar_t buf[32];
+            GetDlgItemTextW(dlg, IDC_LS_START, buf, 32);
+            unsigned long long start = _wcstoui64(buf, NULL, 10);
+            GetDlgItemTextW(dlg, IDC_LS_COUNT, buf, 32);
+            unsigned long long count = _wcstoui64(buf, NULL, 10);
+            int emit    = GetDlgItemInt(dlg, IDC_LS_EMIT,    NULL, FALSE);
+            int threads = GetDlgItemInt(dlg, IDC_LS_THREADS, NULL, FALSE);
+            if (count < 1 || emit < 1 || threads < 1 || threads > 64)
+            {
+                MessageBoxW(dlg, L"Count and Emit must be at least 1; Threads 1-64.",
+                            L"Run Latent Search", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (!LaunchSearch(start, count, emit, threads,
+                              IsDlgButtonChecked(dlg, IDC_LS_SWARM)   == BST_CHECKED,
+                              IsDlgButtonChecked(dlg, IDC_LS_SEEK)    == BST_CHECKED,
+                              IsDlgButtonChecked(dlg, IDC_LS_REFRESH) == BST_CHECKED))
+            {
+                MessageBoxW(dlg, L"Could not launch tools\\latent_search.ps1 - is the "
+                                 L"exe running outside its repo tree?",
+                            L"Run Latent Search", MB_OK | MB_ICONERROR);
+                return TRUE;   // stay open so the fields aren't lost
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+extern "C" void LatentSearchDialog(HWND owner)
+{
+    // Modal on the render thread: the loop pauses while the dialog is up, same
+    // trade the menu bar already makes while a popup is tracking.
+    DialogBoxParamW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_LATENT_SEARCH),
+                    owner, SearchDlgProc, 0);
+}
+
 #endif // MILKDROP_STANDALONE

@@ -67,6 +67,11 @@ void LatentResetIntro(void);
 const wchar_t* LatentGetRollsDir(void);
 const wchar_t* LatentGetNotesPath(void);
 
+// Latent > Run search...: modal dialog over the main window that launches
+// tools\latent_search.ps1 (scan -> triage -> X refresh) detached. Start is
+// pre-filled with the next free seed from Licium\latent_search_ranges.txt.
+void LatentSearchDialog(HWND owner);
+
 #ifdef __cplusplus
 }
 #endif

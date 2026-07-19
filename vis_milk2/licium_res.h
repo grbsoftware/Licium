@@ -14,4 +14,16 @@
 // decoded with GDI+ at startup for the splash window.
 #define IDR_LICIUM_SPLASH 2
 
+// Latent > Run search... dialog (drives tools\latent_search.ps1 — the
+// scan -> triage -> X pipeline — from the GUI). Ids from 130x to stay clear
+// of the engine's plugin.rc dialogs (low ids) and the 0xE1xx menu range.
+#define IDD_LATENT_SEARCH 130
+#define IDC_LS_START      1301
+#define IDC_LS_COUNT      1302
+#define IDC_LS_EMIT       1303
+#define IDC_LS_THREADS    1304
+#define IDC_LS_SWARM      1305
+#define IDC_LS_SEEK       1306
+#define IDC_LS_REFRESH    1307
+
 #endif // LICIUM_RES_H

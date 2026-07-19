@@ -477,6 +477,7 @@ static void HostSplashTick(void)
 #define HM_LATENT_EXPLORE 0xE1A0
 #define HM_LATENT_FOLDER  0xE1A1
 #define HM_LATENT_NOTES   0xE1A2
+#define HM_LATENT_SEARCH  0xE1A3   // Run search... dialog (latent_search.ps1)
 #define HM_HELP_INTRO     0xE132   // Show intro pages again (Help)
 
 // Command id of the currently-selected audio source (for the menu radio check).
@@ -568,6 +569,7 @@ extern "C" HMENU HostBuildMenuBar(void)
     // offline prospector (tools\latent_prospect) + triage emitted.
     HMENU latent = CreatePopupMenu();
     AppendMenuW(latent, MF_STRING, HM_LATENT_EXPLORE, L"&Explore\tX");
+    AppendMenuW(latent, MF_STRING, HM_LATENT_SEARCH,  L"&Run search...");
     AppendMenuW(latent, MF_SEPARATOR, 0, NULL);
     AppendMenuW(latent, MF_STRING, HM_LATENT_FOLDER, L"&Open rolls folder");
     AppendMenuW(latent, MF_STRING, HM_LATENT_NOTES,  L"Open notes &file");
@@ -766,6 +768,9 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         return 1;
     case HM_LATENT_EXPLORE:
         LatentBrowserOpen();
+        return 1;
+    case HM_LATENT_SEARCH:
+        LatentSearchDialog(hwnd);
         return 1;
     case HM_LATENT_FOLDER:
         ShellExecuteW(hwnd, L"open", LatentGetRollsDir(), NULL, NULL, SW_SHOWNORMAL);
