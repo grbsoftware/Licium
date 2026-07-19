@@ -157,6 +157,32 @@ progress UI, per-method result tagging in X. Design doc when its turn
 comes; the current cold/swarm/seek experiments are the data that
 calibrates it.
 
+## GPU screening (Gary, 2026-07-18 — approved direction, build after the
+## cold/swarm/seek experiment lands)
+
+Raw-compute offload for the screens, ~10–20x on top of the CPU threads
+(his card: GTX 1660 Ti, ~1536 cores; driver reports CUDA 11.1, not 13.x).
+Decisions taken in discussion:
+
+- **D3D11 compute shaders, not CUDA** — vendor-neutral (NVIDIA/AMD/Intel;
+  "even if they are using a different kind of card"), no toolkit install,
+  works on his current 2020 driver, and the D3D compiler is already part
+  of this project's world.
+- **V1 role: GPU proposes, CPU decides.** The GPU runs the settle-screens
+  as a mass REJECTOR with safety margins; passers and near-threshold
+  candidates are re-screened on CPU exactly as today. Queue, scores, and
+  rankings remain byte-identical CPU truth — GPU float drift can only
+  cost a sliver of borderline candidates, never corrupt a result.
+- **Bit-exact promotion path:** the lean vocabulary is accidentally
+  GPU-determinism-friendly — add/sub/mul/div/min/max/abs/floor/frac are
+  all IEEE-exact; no transcendentals. With FMA contraction pinned on both
+  sides, bit-exact GPU screening is provable for this grammar; a large
+  A/B zero-mismatch run would promote the GPU from proposer to referee.
+- Build shape: flatten trees to postfix programs, batch thousands of
+  candidates per dispatch, one thread per (candidate, cell), readback
+  pass/fail + scores. Expedition mixer gains a gpu share knob when both
+  exist.
+
 ## What stays parked (explicitly not this milestone)
 
 Rank-side pheromone (superseded — generation-side swarm exists instead);
