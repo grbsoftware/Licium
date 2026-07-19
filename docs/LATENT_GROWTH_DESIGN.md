@@ -240,10 +240,67 @@ long-horizon stability. Two consequences feed the decisions below:
    NOW (all Latent-side, no engine changes); the Bandit gate implements
    together with Bandit L2 (it touches the same generator tables), using
    this doc's spec. *Alternative:* everything in one push.
-3. **Medium variety — "the land of swirls."** RECOMMENDED: roll the
-   MEDIUM from a side-hash too (swirl / cell lattice / meandering stream /
-   drift-weave, the proven Bandit four) in the next latent genver — the
-   scaffold's fixed swirl is the Bandit comma-spiral lesson again, and
-   stub regrowths then return on a genuinely different stage each visit.
-   *Alternative:* keep the fixed swirl for lineage stability; medium
-   variety in a later pass.
+3. **Medium variety — SUPERSEDED by Gary's dynamics critique (below).**
+   The original either/or (rolled archetypes vs fixed swirl) was scoped
+   too small; see "The open scaffold" — decision 3 is now: bless that
+   direction and its staging, or amend it.
+
+## The open scaffold (Gary's dynamics critique, 2026-07-18 late — the real decision 3)
+
+After rating the three-haul experiment Gary rejected the premise, not
+the tuning: *"I'm seeing one of 3 or 4 movements and it's all whether it
+decays too fast or blooms too fast. I'd be happier seeing something
+unique plotting on the screen. ALL of the music is being applied to
+brightness. They're all ones which literally just flip colors. I thought
+a shader is MUCH more dynamic than this."*
+
+He is right, and the confinement is structural. In the v1 scaffold the
+evolved formula only chooses WHERE INK APPEARS. Everything a viewer
+actually perceives is pinned outside the search:
+
+- **Motion** = the fixed swirl medium → "one of 3 or 4 movements."
+- **Audio** = one multiplier on injection gain → "music applied to
+  brightness, 99% of the time." Audio never bends geometry.
+- **Color** = one density→ramp mapping → "they just flip colors."
+- **Development** = decay/equilibrium knobs → "decays too fast or blooms
+  too fast or in between" is literally the only axis left.
+
+A shader IS much more dynamic than this: in real presets the equations
+own per-pixel geometry (warp-space UV math), audio multiplies angles /
+scales / offsets / frequencies, and patterns plot directly to the
+screen. v1 searched ink-stain space; the product is named latent
+SHADER space. The fix opens the scaffold so the grammar reaches the
+things the eye judges:
+
+1. **Evolved warp geometry.** Grammar emits UV-transform terms (rotate,
+   radial push/pull, shear, wave displacement, mirror-across-rolled-axis
+   — no kaleidoscope, per Gary's standing taste) composed per-pixel.
+   This is where MilkDrop dynamism actually lives.
+2. **Audio into geometry, enforced.** New vocab slots where bass / mid /
+   treb / beat multiply GEOMETRIC coefficients (angle, scale, offset,
+   frequency, warp amplitude). Screen upgrade: "uses-audio" is only
+   satisfied by an audio term in a geometric slot — a gain-only audio
+   term no longer passes. Music must change SHAPE, not brightness.
+3. **Plot terms.** Comp-space pattern functions drawn directly (the
+   "something unique plotting on the screen") — the formula's own
+   geometry visible as line/band/cell structure, not filtered through
+   ink density.
+4. **Feedback demoted from law to ingredient.** Decay becomes a rolled
+   parameter spanning ~0 (pure plot, no memory) → heavy fluid. The
+   fluid look is one costume among several, not the constitution.
+   (Overturns the earlier "laws are fixed" framing in this doc's
+   ancestry — Gary explicitly prefers unique plots over same-fluid.)
+5. **Color from the formula.** An evolved hue term (formula value →
+   hue rotation over the palette) alongside the density ramp, so color
+   structure varies within a roll, not only between rolls.
+
+**Staging (RECOMMENDED):** one genver step, not five. Next genver ships
+the open scaffold with a small vocab for each of 1/2/3/5 plus rolled
+decay (4); screens recalibrate on its first 100k scan (frozen/blowout
+thresholds, the geometric uses-audio rule, variance). The ψ-potential
+evolved-wind idea from the earlier ladder folds into slot 1 as one term
+family. Determinism/lineage: new genver, old LX1/LX2 rolls remain
+loadable and decodable; stub-pile regrowths re-audition on the open
+scaffold (a stub that bored on the swirl stage may sing as a plot).
+*Alternative:* stage archetype-rolling first (the superseded rec) —
+cheaper, but it spends a genver on more of what Gary just rejected.
