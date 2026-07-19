@@ -294,13 +294,48 @@ things the eye judges:
    hue rotation over the palette) alongside the density ramp, so color
    structure varies within a roll, not only between rolls.
 
-**Staging (RECOMMENDED):** one genver step, not five. Next genver ships
-the open scaffold with a small vocab for each of 1/2/3/5 plus rolled
-decay (4); screens recalibrate on its first 100k scan (frozen/blowout
-thresholds, the geometric uses-audio rule, variance). The ψ-potential
-evolved-wind idea from the earlier ladder folds into slot 1 as one term
-family. Determinism/lineage: new genver, old LX1/LX2 rolls remain
-loadable and decodable; stub-pile regrowths re-audition on the open
-scaffold (a stub that bored on the swirl stage may sing as a plot).
-*Alternative:* stage archetype-rolling first (the superseded rec) —
-cheaper, but it spends a genver on more of what Gary just rejected.
+**The vocabulary: `SHADER_BEHAVIOR_RESEARCH.md`** (adopted into docs\
+2026-07-18 with a provenance header; authored 2026-07-12, Gary's
+spitballing + public sources, no 3.33 content). It predicted tonight's
+finding a week early ("Medium: ONE family — the biggest monoculture in
+the genome") and carries the ranked behavior families — wave-equation
+water, momentum fluid, Gray-Scott reaction-diffusion, caustics (Tier 1);
+SmoothLife/Lenia, agent swarms, pseudo-physarum (Tier 2) — with audio
+wired into PHYSICS (bass = dropped stones, treble = rain, audio perturbs
+RD's F/k), plus slot mapping onto the L2 buffer layers and per-family
+risk notes.
+
+**"But how do we find new behaviors if the behaviors are code?"**
+(Gary, 2026-07-18) — answered, and it sets the third rung: behaviors
+are code, but code is COMPOSABLE. Every family in the research doc is a
+tiny expression over ~6 dynamical primitives (current state, previous
+state, neighbor samples, laplacian, gradient, displaced self-sample):
+wave water is `2h - h_prev + c^2*lap(h)`; Gray-Scott is `lap + u*v*v`.
+Put THOSE primitives in the vocabulary and make the evolved tree the
+UPDATE RULE of a feedback buffer — the grammar then writes physics,
+and the search can reach both the named families and their unnamed
+neighbors. Phase B is already a behavior filter (frozen/blowout/
+must-dance select for living dynamics); pass rates will crater on rule
+space (edge of chaos is thin) — that is what 10M scans and the GPU
+direction are for. Hand-coded Tier-1 families ship as guaranteed-alive
+islands, and the mine→name→promote loop (law 2) turns discovered rule
+fragments into named vocabulary: behaviors start as code we wrote and
+end as code the search wrote and Gary kept.
+
+**Staging (RECOMMENDED): three rungs, one genver each, strictly
+increasing search space.**
+1. **Rolled archetypes** — medium rolled from the proven Bandit four +
+   the research doc's Tier 1 as they land. Variety of OUR behaviors;
+   cheapest; first data on whether behavior variety moves like-rate.
+2. **Open scaffold** — the five openings above (evolved warp geometry,
+   audio in geometric slots enforced by the screens, plot terms, decay
+   as rolled ingredient, evolved hue). Formula reaches everything the
+   eye judges.
+3. **Evolved update rules** — dynamical primitives in the vocab; the
+   tree IS the buffer physics; screens recalibrated for rule space.
+   The ψ-potential wind is the divergence-free special case and folds
+   in here.
+Determinism/lineage: each rung is a genver; old LX1/LX2 rolls stay
+loadable and decodable; stub-pile regrowths re-audition on each new
+stage (a stub that bored on the swirl stage may sing as a plot or as
+an organism). Screens recalibrate on each rung's first 100k scan.
