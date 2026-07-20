@@ -25,5 +25,6 @@
 #define IDC_LS_SWARM      1305
 #define IDC_LS_SEEK       1306
 #define IDC_LS_REFRESH    1307
+#define IDC_LS_NOHARVEST  1308
 
 #endif // LICIUM_RES_H

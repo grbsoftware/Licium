@@ -30,7 +30,7 @@ IDR_LICIUM_SPLASH RCDATA "..\\brand\\licium_splash.png"
 
 // Latent > Run search... — GUI front end for tools\latent_search.ps1
 // (scan -> triage -> X). Field meanings mirror the script's parameters.
-IDD_LATENT_SEARCH DIALOGEX 0, 0, 250, 152
+IDD_LATENT_SEARCH DIALOGEX 0, 0, 250, 166
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Run Latent Search"
 FONT 9, "Segoe UI"
@@ -47,8 +47,9 @@ BEGIN
     AUTOCHECKBOX    "Swarm mode (LXS1, pheromone state)",     IDC_LS_SWARM,   10,  86, 230, 10
     AUTOCHECKBOX    "Seek threads (filament-profile ranking)", IDC_LS_SEEK,    10, 100, 230, 10
     AUTOCHECKBOX    "Open X with the haul when done",          IDC_LS_REFRESH, 10, 114, 230, 10
-    DEFPUSHBUTTON   "Run",    IDOK,     130, 132, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 188, 132, 50, 14
+    AUTOCHECKBOX    "Skip early haul (scan straight away)",     IDC_LS_NOHARVEST, 10, 128, 230, 10
+    DEFPUSHBUTTON   "Run",    IDOK,     130, 146, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 188, 146, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO

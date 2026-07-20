@@ -729,8 +729,21 @@ static wchar_t g_searchTitle[96] = {0};
 static DWORD   g_searchEndTick = 0;
 static int     g_searchPoll    = 0;
 
+// Glide state. The prospector flushes a scan tick only every ~256K seeds, so
+// the measured fraction arrives in big steps seconds apart. The bar advances
+// between ticks at the rate the last two ticks implied, capped so it can never
+// outrun the tick it is predicting — display-side extrapolation, nothing about
+// the search itself is smoothed or estimated away.
+static float   g_searchShown    = 0.0f;   // what the bar draws
+static float   g_searchPrevFrac = 0.0f;   // measured value before the last tick
+static DWORD   g_searchTickTime = 0;      // when the last tick was parsed
+static float   g_searchRate     = 0.0f;   // fraction per ms, EMA over ticks
+static DWORD   g_searchFrameTick = 0;
+static int     g_searchScanTicked = 0;    // a real scan tick has been parsed
+
 static int LaunchSearch(unsigned long long start, unsigned long long count,
-                        int emit, int threads, int swarm, int seek, int refresh)
+                        int emit, int threads, int swarm, int seek, int refresh,
+                        int noHarvest)
 {
     wchar_t script[MAX_PATH];
     if (!ResolveSearchScript(script)) return 0;
@@ -745,11 +758,12 @@ static int LaunchSearch(unsigned long long start, unsigned long long count,
     // search seems to vanish (e.g. the script's range-overlap guard threw).
     wchar_t cmd[2048];
     swprintf(cmd, L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-                  L"\"& '%s' -Start %llu -Count %llu -Emit %d -Threads %d%s%s%s *>> '%s'\"",
+                  L"\"& '%s' -Start %llu -Count %llu -Emit %d -Threads %d%s%s%s%s *>> '%s'\"",
              script, start, count, emit, threads,
-             swarm   ? L" -Swarm"        : L"",
-             seek    ? L" -Seek threads" : L"",
-             refresh ? L""               : L" -NoRefresh",
+             swarm     ? L" -Swarm"        : L"",
+             seek      ? L" -Seek threads" : L"",
+             refresh   ? L""               : L" -NoRefresh",
+             noHarvest ? L" -NoHarvest"    : L"",
              logPath);
 
     STARTUPINFOW si = { sizeof(si) };
@@ -770,6 +784,9 @@ static int LaunchSearch(unsigned long long start, unsigned long long count,
     g_searchFrac  = 0.0f;
     wcscpy_s(g_searchText, L"search: starting");
     g_searchEndTick = 0;
+    g_searchShown = g_searchPrevFrac = g_searchRate = 0.0f;
+    g_searchTickTime = g_searchFrameTick = 0;
+    g_searchScanTicked = 0;
     return 1;
 }
 
@@ -809,7 +826,8 @@ static INT_PTR CALLBACK SearchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (!LaunchSearch(start, count, emit, threads,
                               IsDlgButtonChecked(dlg, IDC_LS_SWARM)   == BST_CHECKED,
                               IsDlgButtonChecked(dlg, IDC_LS_SEEK)    == BST_CHECKED,
-                              IsDlgButtonChecked(dlg, IDC_LS_REFRESH) == BST_CHECKED))
+                              IsDlgButtonChecked(dlg, IDC_LS_REFRESH) == BST_CHECKED,
+                              IsDlgButtonChecked(dlg, IDC_LS_NOHARVEST) == BST_CHECKED))
             {
                 MessageBoxW(dlg, L"Could not launch tools\\latent_search.ps1 - is the "
                                  L"exe running outside its repo tree?",
@@ -932,11 +950,34 @@ static void SearchPollLog(void)
         unsigned long long a = 0, b = 0;
         if (swscanf(tick, L"...~%llu/%llu", &a, &b) == 2 && b > 0)
         {
+            float m = (float)((double)a / (double)b);
             g_searchPhase = LS_SCAN;
-            g_searchFrac  = (float)((double)a / (double)b);
-            swprintf(g_searchText, L"search: scanning %d%%", (int)(g_searchFrac * 100.0f));
+            g_searchScanTicked = 1;
+            if (m > g_searchFrac)
+            {
+                // Two ticks give the rate the glide runs at. The EMA keeps a
+                // slow thread or a paused machine from whipping the bar.
+                DWORD now = GetTickCount();
+                if (g_searchTickTime && now > g_searchTickTime)
+                {
+                    float r = (m - g_searchFrac) / (float)(now - g_searchTickTime);
+                    g_searchRate = (g_searchRate > 0.0f) ? (0.6f * g_searchRate + 0.4f * r) : r;
+                }
+                g_searchTickTime = now;
+                g_searchPrevFrac = g_searchFrac;
+                g_searchFrac     = m;
+            }
             return;   // harvest lines linger in the tail; real ticks outrank them
         }
+    }
+    // Scanning, but no tick has flushed yet: the prospector only flushes every
+    // ~256K seeds, which is about a minute of wall clock at the usual rate.
+    // Without this the feed still said "starting" well into the scan.
+    if (LastOccur(txt, L"PHASE A"))
+    {
+        g_searchPhase = LS_SCAN;
+        if (!g_searchScanTicked) wcscpy_s(g_searchText, L"search: scanning");
+        return;
     }
     // Phase 0 (queue-leftover harvest) — only reached before the first scan
     // tick. LS_TRIAGE keeps it title-only: harvest triage measures the canvas
@@ -966,6 +1007,44 @@ extern "C" void LatentSearchOverlayRender(IDirect3DDevice9* dev, int w, int h)
     if (g_searchPhase == LS_IDLE) return;
 
     if (++g_searchPoll >= 30) { g_searchPoll = 0; SearchPollLog(); }
+
+    // Glide the drawn fraction toward (never past) the next expected tick.
+    DWORD now = GetTickCount();
+    DWORD dtFrame = g_searchFrameTick ? (now - g_searchFrameTick) : 0;
+    g_searchFrameTick = now;
+    if (g_searchPhase == LS_SCAN)
+    {
+        if (g_searchShown < g_searchFrac) g_searchShown = g_searchFrac;  // truth wins
+        if (g_searchRate > 0.0f && dtFrame)
+        {
+            // Ceiling = where the next tick is due. Reaching it means the tick
+            // is late, and the bar simply waits there rather than lying ahead.
+            float step = g_searchFrac - g_searchPrevFrac;
+            float ceiling = g_searchFrac + (step > 0.0f ? step : 0.0f);
+            if (ceiling > 0.995f) ceiling = 0.995f;
+            g_searchShown += g_searchRate * (float)dtFrame;
+            if (g_searchShown > ceiling) g_searchShown = ceiling;
+        }
+        if (g_searchScanTicked)
+        {
+            // Text follows the glide so the number and the bar never disagree.
+            int pct = (int)(g_searchShown * 100.0f);
+            if (pct > 99) pct = 99;
+            float left = (g_searchRate > 0.0f) ? (1.0f - g_searchShown) / g_searchRate : 0.0f;
+            int secs = (int)(left / 1000.0f);
+            if (secs > 0 && secs < 100 * 60)
+            {
+                if (secs >= 60) swprintf(g_searchText, L"search: scanning %d%% (%dm left)", pct, secs / 60);
+                else            swprintf(g_searchText, L"search: scanning %d%% (%ds left)", pct, secs);
+            }
+            else
+                swprintf(g_searchText, L"search: scanning %d%%", pct);
+        }
+    }
+    else if (g_searchPhase == LS_DONE || g_searchPhase == LS_OPENING)
+        g_searchShown = 1.0f;
+    else
+        g_searchShown = g_searchFrac;
 
     // done/failed linger, then clean up (title restored below on the way out)
     if (g_searchEndTick &&
@@ -1007,15 +1086,17 @@ extern "C" void LatentSearchOverlayRender(IDirect3DDevice9* dev, int w, int h)
     dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
     dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
 
-    float bw = 230.0f, bh = 36.0f, mgn = 10.0f;
+    // 300 wide: m_text clips rather than ellipsizing, and the longest strings
+    // here (scanning + ETA, and the failure line) overran the old 230.
+    float bw = 300.0f, bh = 36.0f, mgn = 10.0f;
     float x0 = w - mgn - bw, y0 = h - mgn - bh;
     LatRect(dev, w, h, x0, y0, x0 + bw, y0 + bh, 0xD8000000);
     LatText(g_searchText, (int)x0 + 8, (int)y0 + 3, (int)(x0 + bw) - 4, (int)y0 + 20,
             g_searchPhase == LS_FAILED ? 0xFFFF6060 : 0xFFFFFFFF);
     float bx0 = x0 + 8, bx1 = x0 + bw - 8, by0 = y0 + bh - 12, by1 = y0 + bh - 6;
     LatRect(dev, w, h, bx0, by0, bx1, by1, 0xFF303030);
-    if (g_searchFrac > 0.0f)
-        LatRect(dev, w, h, bx0, by0, bx0 + (bx1 - bx0) * g_searchFrac, by1,
+    if (g_searchShown > 0.0f)
+        LatRect(dev, w, h, bx0, by0, bx0 + (bx1 - bx0) * g_searchShown, by1,
                 g_searchPhase == LS_FAILED ? 0xFFB03030 : 0xFF30C060);
 
     dev->SetRenderState(D3DRS_ZENABLE, TRUE);
