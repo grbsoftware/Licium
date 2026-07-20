@@ -33,6 +33,7 @@ $Exe       = Join-Path $ReleaseDir "Licium.exe"
 $LiciumDir = Join-Path $ReleaseDir "Licium"
 $RollsDir  = Join-Path $LiciumDir "presets\latent"
 $Verdicts  = Join-Path $LiciumDir "latent_verdicts.jsonl"
+$QuarantDir= Join-Path $RollsDir "quarantine"
 $EnvDir    = Join-Path (Split-Path -Parent $Repo) "env"
 $Grabber   = Join-Path $EnvDir "spout_grab.exe"
 $OutDir    = Join-Path $EnvDir "out\latent_triage"
@@ -93,6 +94,28 @@ function Start-Licium {
         Start-Sleep -Milliseconds 800
     }
     return $r.ProcessId
+}
+
+# A roll can take the whole process down INSIDE the load call: the legacy
+# d3dx9 compiler crashes (not errors) on some evolved shader expressions, and
+# the load is synchronous, so SendMessage just returns 0. Without this check
+# every remaining roll logs a loadfail against a corpse — that cascade poisoned
+# the verdicts file three times before the guard existed.
+function Test-EngineAlive([uint32]$ProcId) {
+    return [bool](Get-Process -Id $ProcId -ErrorAction SilentlyContinue)
+}
+
+function Restart-Engine {
+    Get-Process -Name "Licium" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    $p = Start-Licium
+    $h = Get-MainWindow ([uint32]$p)
+    if ([LT.W]::IsIconic($h)) {
+        [LT.W]::PostMessageW($h, 0x0112, [IntPtr]0xF120, [IntPtr]0) | Out-Null   # SC_RESTORE
+        Start-Sleep -Seconds 2
+    }
+    return @{ ProcId = $p; Main = $h }
 }
 
 function Get-MainWindow([uint32]$ProcId) {
@@ -189,7 +212,24 @@ foreach ($roll in $rolls) {
     # aborted run once made 44 healthy verdicts look like identical clones).
     Get-ChildItem "$OutDir\$id`_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force -Confirm:$false
     $rc = [LT.W]::LoadPreset($main, $roll.FullName)
-    if ($rc -ne 1) {
+    $crashed = ($rc -ne 1) -and -not (Test-EngineAlive ([uint32]$procId))
+    if ($crashed) {
+        # Engine died on this roll. Bring it back and give the roll exactly one
+        # more chance — a second death is deterministic, so quarantine it and
+        # keep going instead of losing the rest of the run to it.
+        Write-Host ("  {0}  engine died on load - relaunching for a retry" -f $id)
+        $e = Restart-Engine; $procId = $e.ProcId; $main = $e.Main
+        $rc = [LT.W]::LoadPreset($main, $roll.FullName)
+        $crashed = ($rc -ne 1) -and -not (Test-EngineAlive ([uint32]$procId))
+        if ($crashed) {
+            $e = Restart-Engine; $procId = $e.ProcId; $main = $e.Main
+            New-Item -ItemType Directory -Force $QuarantDir | Out-Null
+            Move-Item $roll.FullName (Join-Path $QuarantDir $roll.Name) -Force
+        }
+    }
+    if ($crashed) {
+        $res = @{ Verdict = "crasher"; Mean = 0; Motion = 0 }
+    } elseif ($rc -ne 1) {
         $res = @{ Verdict = "loadfail"; Mean = 0; Motion = 0 }
     } else {
         Start-Sleep -Seconds 4                  # first development
@@ -215,7 +255,11 @@ foreach ($roll in $rolls) {
     # (minimized window, held splash, blocked message pump...). Abort loudly
     # rather than mass-produce false verdicts; the streak's lines need manual
     # removal from the verdicts file before a re-run will revisit those ids.
-    if (('{0:0.0000}' -f [double]$res.Mean) -eq ('{0:0.0000}' -f $streakMean) -and [double]$res.Motion -lt 0.0005) {
+    # Only grab-derived verdicts can be stale-frame artifacts. crasher/loadfail
+    # are decided without a grab, so they must not feed the streak counter —
+    # engine death has its own handling above.
+    if ($res.Verdict -in @("crasher", "loadfail")) { $streakMean = -1.0; $streak = 0 }
+    elseif (('{0:0.0000}' -f [double]$res.Mean) -eq ('{0:0.0000}' -f $streakMean) -and [double]$res.Motion -lt 0.0005) {
         $streak++
         if ($streak -ge 4) { throw "STALE-FRAME GUARD: $($streak+1) consecutive identical verdicts (mean=$('{0:0.0000}' -f $streakMean), motion~0). Renderer is not presenting. Last ids: $(($results | Select-Object -Last ($streak+1) | ForEach-Object { $_.Id }) -join ', ')" }
     } else { $streakMean = [double]$res.Mean; $streak = 0 }
