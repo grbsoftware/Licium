@@ -3687,7 +3687,7 @@ bool CPlugin::LoadShaderFromMemory( const char* szOrigShaderText, char* szFn, ch
     default:           lstrcpy(szWhichShader, "(unknown)"); break;
     }
 
-    LPD3DXBUFFER pShaderByteCode;
+    LPD3DXBUFFER pShaderByteCode = NULL;   // the modern-compile path releases it on failure
     wchar_t title[64];
     
     *ppShader = NULL;
@@ -3829,7 +3829,40 @@ bool CPlugin::LoadShaderFromMemory( const char* szOrigShaderText, char* szFn, ch
 
 	bool failed=false;
     int len = lstrlen(szShaderText);
-    if (D3D_OK != pCompileShader(
+
+    // Modern compiler first. The legacy D3DX9 one CRASHES the process (not
+    // errors) on some deeply-nested expressions - it is how evolved latent
+    // rolls killed the renderer during preset load. D3DCompile builds the same
+    // ps_3_0 bytecode without dying, and the constant table is recovered from
+    // that bytecode's CTAB block. If it is unavailable or rejects the shader we
+    // fall through to the old path, so nothing that compiled before stops
+    // compiling now.
+    bool bCompiled = false;
+    if (pD3DCompile && pGetShaderConstantTable)
+    {
+        // USE_LEGACY_D3DX9_31_DLL is a D3DX-only routing flag and has no
+        // meaning here; the rest (e.g. DEBUG) share D3DCOMPILE_* values.
+        UINT modernFlags = (UINT)(m_dwShaderFlags & ~D3DXSHADER_USE_LEGACY_D3DX9_31_DLL);
+        LPD3DXBUFFER pModernErrors = NULL;
+        if (D3D_OK == pD3DCompile(szShaderText, (SIZE_T)len, NULL, NULL, NULL,
+                                  szFn, szProfile, modernFlags, 0,
+                                  &pShaderByteCode, &pModernErrors)
+            && pShaderByteCode
+            && D3D_OK == pGetShaderConstantTable(
+                             (const DWORD*)pShaderByteCode->GetBufferPointer(),
+                             ppConstTable))
+        {
+            bCompiled = true;
+        }
+        else
+        {
+            SafeRelease(pShaderByteCode);
+            *ppConstTable = NULL;
+        }
+        SafeRelease(pModernErrors);
+    }
+
+    if (!bCompiled && D3D_OK != pCompileShader(
         szShaderText,
         len,
         NULL,//CONST D3DXMACRO* pDefines,
@@ -3840,7 +3873,7 @@ bool CPlugin::LoadShaderFromMemory( const char* szOrigShaderText, char* szFn, ch
         &pShaderByteCode,
 				&m_pShaderCompileErrors,
 				ppConstTable
-				)) 
+				))
 		{
 			failed=true;
 		}
@@ -8607,6 +8640,15 @@ retry:
 			// skip "." directory
 			if (wcscmp(fd.cFileName, L".")==0)// || lstrlen(ffd.cFileName) < 1)
 				bSkip = true;
+#ifdef MILKDROP_STANDALONE
+            // Latent rolls are search OUTPUT, not presets - ingredients the
+            // Bandit draws from, browsed in X (which reads the folder directly,
+            // so hiding it here costs nothing). Keeping the dir out of the list
+            // also keeps auto-advance from wandering into the untriaged tail,
+            // where the rolls that crash the shader compiler on load live.
+            else if (wcsicmp(fd.cFileName, L"latent")==0)
+                bSkip = true;
+#endif
 			else
 				swprintf(szFilename, L"*%s", fd.cFileName);
 		}

@@ -644,6 +644,18 @@ static void HostOpenPresetDialog(HWND hwnd)
 // engine's preset list at it, and start auto-advancing through it. MilkDrop's
 // "playlist" is really its preset directory plus timed navigation, so we reuse
 // the engine's own machinery rather than build a parallel one.
+// Set the preset lock through the PHYSICAL Scroll Lock key, never by assigning
+// the flag alone. The engine derives m_bPresetLockedByUser from the real key
+// state on every VK_SCROLL press, so a bare assignment desyncs the two: the
+// LED stays lit while auto-advance runs, and the user's next press reads the
+// key as "already on", turns it off, and appears to do nothing. That is why
+// Scroll Lock looked dead after loading a playlist.
+static void HostSetPresetLock(bool locked)
+{
+    g_plugin.m_bPresetLockedByUser = locked;
+    SetScrollLock(locked ? 1 : 0, g_plugin.m_bPreventScollLockHandling);
+}
+
 static void HostLoadPlaylistDialog(HWND hwnd)
 {
     wchar_t path[MAX_PATH] = L"";
@@ -657,6 +669,20 @@ static void HostLoadPlaylistDialog(HWND hwnd)
 
     if (SHGetPathFromIDListW(pidl, path) && path[0])
     {
+        // The latent rolls folder is not a playlist: it is search output, and
+        // its untriaged tail contains rolls that kill the renderer on load.
+        // Browse those in X (press x), which loads one at a time on purpose.
+        if (wcsstr(path, L"\\latent") != NULL)
+        {
+            MessageBoxW(hwnd,
+                        L"That is the latent rolls folder - search output, not presets.\n\n"
+                        L"Browse latent rolls in the X browser instead. Playlists are for "
+                        L"bandit rolls and downloaded presets.",
+                        L"Load preset folder", MB_OK | MB_ICONINFORMATION);
+            CoTaskMemFree(pidl);
+            return;
+        }
+
         // Preset dir needs a trailing backslash for the engine's list scan.
         size_t n = wcslen(path);
         if (n && path[n - 1] != L'\\' && n + 1 < MAX_PATH) { path[n] = L'\\'; path[n + 1] = 0; }
@@ -665,7 +691,7 @@ static void HostLoadPlaylistDialog(HWND hwnd)
         g_plugin.UpdatePresetList();                    // rescan the new folder
         if (g_plugin.m_fTimeBetweenPresets < 1.0f)
             g_plugin.m_fTimeBetweenPresets = 15.0f;     // ensure it actually advances
-        g_plugin.m_bPresetLockedByUser = false;         // enable auto-advance
+        HostSetPresetLock(false);                       // enable auto-advance
         g_plugin.LoadRandomPreset(2.0f);                // jump into the folder
         g_playlistActive = true;
         EnableMenuItem(GetMenu(hwnd), HM_PLAYLIST_STOP, MF_BYCOMMAND | MF_ENABLED);
@@ -751,7 +777,7 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         HostLoadPlaylistDialog(hwnd);
         return 1;
     case HM_PLAYLIST_STOP:
-        g_plugin.m_bPresetLockedByUser = true;   // hold the current preset
+        HostSetPresetLock(true);                 // hold the current preset
         g_playlistActive = false;
         EnableMenuItem(GetMenu(hwnd), HM_PLAYLIST_STOP, MF_BYCOMMAND | MF_GRAYED);
         return 1;

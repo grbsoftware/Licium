@@ -149,6 +149,40 @@ typedef HRESULT (WINAPI *D3DXCOMPILESHADER)(
         LPD3DXCONSTANTTABLE*            ppConstantTable);
 extern D3DXCOMPILESHADER pCompileShader;
 
+// D3DCompile out of d3dcompiler_47.dll - the modern HLSL compiler. The D3DX9
+// one (especially under D3DXSHADER_USE_LEGACY_D3DX9_31_DLL) does not merely
+// reject some deeply-nested expressions, it CRASHES the process on them, which
+// takes the renderer down mid-preset-load. The modern compiler builds the same
+// ps_3_0 bytecode without the crash, so it gets first refusal and D3DX9 stays
+// as the fallback.
+//
+// ID3DBlob and ID3DXBuffer are the same interface shape (IUnknown +
+// GetBufferPointer + GetBufferSize), so the blob out-params are typed as
+// LPD3DXBUFFER* here and the rest of the engine keeps working unchanged.
+// pDefines/pInclude are void* because we always pass NULL and this keeps the
+// legacy DX9 headers free of d3dcommon.h.
+typedef HRESULT (WINAPI *D3DCOMPILEPROC)(
+        LPCVOID                         pSrcData,
+        SIZE_T                          SrcDataSize,
+        LPCSTR                          pSourceName,
+        const void*                     pDefines,
+        void*                           pInclude,
+        LPCSTR                          pEntrypoint,
+        LPCSTR                          pTarget,
+        UINT                            Flags1,
+        UINT                            Flags2,
+        LPD3DXBUFFER*                   ppCode,
+        LPD3DXBUFFER*                   ppErrorMsgs);
+extern D3DCOMPILEPROC pD3DCompile;
+
+// Recovers the constant table from already-compiled ps_3_0 bytecode (the CTAB
+// comment block), so the modern compiler can feed the engine's existing
+// constant-binding code without D3DXCompileShader handing us one.
+typedef HRESULT (WINAPI *D3DXGETSHADERCONSTANTTABLE)(
+        CONST DWORD*                    pFunction,
+        LPD3DXCONSTANTTABLE*            ppConstantTable);
+extern D3DXGETSHADERCONSTANTTABLE pGetShaderConstantTable;
+
 typedef D3DXMATRIX* (WINAPI *D3DXMATRIXLOOKATLH)( D3DXMATRIX *pOut, CONST D3DXVECTOR3 *pEye, CONST D3DXVECTOR3 *pAt, CONST D3DXVECTOR3 *pUp );
 extern D3DXMATRIXLOOKATLH pMatrixLookAtLH;
 

@@ -1186,6 +1186,8 @@ D3DXMATRIXROTATION pMatrixRotationX=0, pMatrixRotationY=0, pMatrixRotationZ=0;
 D3DXCREATETEXTUREFROMFILEEXW pCreateTextureFromFileExW=0;
 D3DXMATRIXORTHOLH pMatrixOrthoLH = 0;
 D3DXCOMPILESHADER pCompileShader=0;
+D3DCOMPILEPROC pD3DCompile=0;
+D3DXGETSHADERCONSTANTTABLE pGetShaderConstantTable=0;
 D3DXMATRIXLOOKATLH pMatrixLookAtLH=0;
 D3DXCREATETEXTURE pCreateTexture=0;
 //----------------------------------------------------------------------
@@ -1224,6 +1226,7 @@ HMODULE FindD3DX9(HWND winamp)
 		pCreateTextureFromFileExW = (D3DXCREATETEXTUREFROMFILEEXW)GetProcAddress(d3dx9,"D3DXCreateTextureFromFileExW");
 		pMatrixOrthoLH = (D3DXMATRIXORTHOLH)GetProcAddress(d3dx9,"D3DXMatrixOrthoLH");
 		pCompileShader = (D3DXCOMPILESHADER)GetProcAddress(d3dx9,"D3DXCompileShader");
+		pGetShaderConstantTable = (D3DXGETSHADERCONSTANTTABLE)GetProcAddress(d3dx9,"D3DXGetShaderConstantTable");
 		pMatrixLookAtLH = (D3DXMATRIXLOOKATLH)GetProcAddress(d3dx9,"D3DXMatrixLookAtLH");
 		pCreateTexture = (D3DXCREATETEXTURE)GetProcAddress(d3dx9,"D3DXCreateTexture");
 		
@@ -1231,6 +1234,19 @@ HMODULE FindD3DX9(HWND winamp)
 		
 	}
 	
+	// The modern compiler ships with Windows (8.1+ has d3dcompiler_47 in
+	// system32); _43 is the DirectX-redist name and is only a courtesy
+	// fallback. Absent both, pD3DCompile stays NULL and everything runs on the
+	// legacy D3DX9 path exactly as before.
+	if (!pD3DCompile)
+	{
+		HMODULE d3dcompiler = LoadLibrary("d3dcompiler_47.dll");
+		if (!d3dcompiler) d3dcompiler = LoadLibrary("d3dcompiler_46.dll");
+		if (!d3dcompiler) d3dcompiler = LoadLibrary("d3dcompiler_43.dll");
+		if (d3dcompiler)
+			pD3DCompile = (D3DCOMPILEPROC)GetProcAddress(d3dcompiler, "D3DCompile");
+	}
+
 	return d3dx9;
 }
 
