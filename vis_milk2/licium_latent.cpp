@@ -60,6 +60,21 @@ static const wchar_t* VerdictName(int v)
     }
 }
 
+// Single-glyph verdict for the compact row (the narrow panel has no room for
+// the full word). A alive / L latebloom / B blowout / F frozen / K black.
+static const wchar_t* VerdictShort(int v)
+{
+    switch (v)
+    {
+    case LV_ALIVE:     return L"A";
+    case LV_LATEBLOOM: return L"L";
+    case LV_BLOWOUT:   return L"B";
+    case LV_FROZEN:    return L"F";
+    case LV_BLACK:     return L"K";
+    default:           return L"-";
+    }
+}
+
 #define LATENT_ID_LEN   20    // "LX1-XXXXXXXX" + headroom for later genvers
 #define LATENT_NTAGS    6
 #define LATENT_NOTE_LEN 256
@@ -583,9 +598,13 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
     else
     {
         // Side panel over the live roll: the roll IS the content, so the list
-        // takes the left edge only and the rest of the screen stays preset.
-        float panelW = w * 0.40f;
-        if (panelW < 300.0f) panelW = (float)((w < 300) ? w : 300);
+        // hugs the left edge and the rest of the screen stays preset. Gary's
+        // ask (2026-07-21) — the old 300px min was a slab over the 512 canvas
+        // (~58%). SIMPLE_FONT is ~fixed-pixel (not resolution-scaled), so size
+        // to a fixed width that just clears the widest line (~180px of compact
+        // rows / legend) rather than a %-of-width that overflows when narrow.
+        float panelW = 200.0f;
+        if (panelW > w - 20.0f) panelW = (float)((w > 40) ? (w - 20) : w);
         LatRect(dev, w, h, 0, 0, panelW, (float)h, 0xD8000000);
         LatRect(dev, w, h, panelW, 0, panelW + 2.0f, (float)h, 0xFF303030);
 
@@ -610,12 +629,12 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             }
             swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
             LatText(buf, x0, line / 2, x1, line / 2 + line, 0xFFFFFFFF);
-            swprintf(buf, L"%d alive \x00b7 %d new \x00b7 %d shelf",
+            swprintf(buf, L"%d lv \x00b7 %d nw \x00b7 %d sh",
                      nAlive, nNew, nShelf);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
-            LatText(L"Y like  N pass  U clear  1-6 tag",
+            LatText(L"Y like  N pass  U clr",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
-            LatText(L"D describe  X close",
+            LatText(L"1-6 tag  D descr  X",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
         }
 
@@ -652,9 +671,9 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 tags[nt] = 0;
 
                 wchar_t buf[96];
-                swprintf(buf, L"%s  %s%s%s%s%s", r->id, VerdictName(r->verdict),
-                         nt ? L"  #" : L"", tags,
-                         r->hasNote ? L"  *" : L"", L"");
+                swprintf(buf, L"%s %s%s%s%s", r->id, VerdictShort(r->verdict),
+                         nt ? L" #" : L"", tags,
+                         r->hasNote ? L" *" : L"");
 
                 DWORD col;
                 int rk = VerdictRank(r->verdict);
