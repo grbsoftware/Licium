@@ -281,14 +281,13 @@ static int __cdecl RollCompare(const void* a, const void* b)
 {
     const LatentRoll* ra = (const LatentRoll*)a;
     const LatentRoll* rb = (const LatentRoll*)b;
-    // Group first (unvoted -> liked -> passed shelf), then machine verdict,
-    // then id. Sort is applied at open only, so a mid-session vote never moves
-    // a roll out from under the cursor.
+    // Group first (unvoted -> liked -> passed shelf), then id DESCENDING so the
+    // NEWEST search results sit at the top (higher lineage + higher seed = more
+    // recent). Sort is applied at open only, so a mid-session vote never moves a
+    // roll out from under the cursor.
     int ga = RollGroup(ra), gb = RollGroup(rb);
     if (ga != gb) return ga - gb;
-    int d = VerdictRank(ra->verdict) - VerdictRank(rb->verdict);
-    if (d) return d;
-    return wcscmp(ra->id, rb->id);
+    return wcscmp(rb->id, ra->id);            // descending
 }
 
 // ---- sectioned display list -------------------------------------------------
@@ -300,6 +299,11 @@ static DispEntry* g_disp       = NULL;
 static int*       g_rollToDisp = NULL;   // roll index -> its display row
 static int        g_dispCount  = 0;
 static int        g_dispCap    = 0;
+
+// Toggle (h): when on, the voted rolls (liked + passed) drop out of the list and
+// out of navigation, leaving only the "to vote" rolls. Persisted per Gary's use.
+static int        g_hideVoted  = 0;
+static int RollVisible(int i) { return !g_hideVoted || RollGroup(&g_rolls[i]) == 0; }
 
 static void BuildDisplayList(void)
 {
@@ -317,7 +321,10 @@ static void BuildDisplayList(void)
     for (int i = 0; i < g_count; i++)
     {
         int g = RollGroup(&g_rolls[i]);
-        if (g != prevGroup)
+        if (!RollVisible(i)) { g_rollToDisp[i] = 0; continue; }   // filtered out
+        // Section headers only make sense with the shelf showing; when filtering
+        // to unvoted-only there is one group, so drop the header entirely.
+        if (!g_hideVoted && g != prevGroup)
         {
             g_disp[g_dispCount].isHeader = 1;
             g_disp[g_dispCount].group    = g;
@@ -331,6 +338,25 @@ static void BuildDisplayList(void)
         g_disp[g_dispCount].rollIdx  = i;
         g_dispCount++;
     }
+}
+
+// Navigation is roll-space; these skip filtered-out rolls so the cursor never
+// lands on a hidden one. dir = +1 (down) / -1 (up). Returns -1 if none.
+static int StepSel(int from, int dir)
+{
+    for (int i = from + dir; i >= 0 && i < g_count; i += dir)
+        if (RollVisible(i)) return i;
+    return -1;
+}
+static int FirstVisible(void)
+{
+    for (int i = 0; i < g_count; i++) if (RollVisible(i)) return i;
+    return -1;
+}
+static int LastVisible(void)
+{
+    for (int i = g_count - 1; i >= 0; i--) if (RollVisible(i)) return i;
+    return -1;
 }
 
 // ---- appending state ---------------------------------------------------------
@@ -392,8 +418,11 @@ extern "C" void LatentBrowserOpen(void)
     LoadNotes(NULL, NULL);
     if (g_count > 1)
         qsort(g_rolls, g_count, sizeof(LatentRoll), RollCompare);
+    g_hideVoted = GetPrivateProfileIntW(L"settings", L"bLatentHideVoted", 0,
+                                        g_plugin.GetConfigIniFile());
     BuildDisplayList();
-    g_sel = 0;
+    int fv = FirstVisible();
+    g_sel = (fv >= 0) ? fv : 0;
     g_scroll = 0;
 
     int seen = GetPrivateProfileIntW(L"settings", L"bLatentIntroSeen", 0,
@@ -446,10 +475,38 @@ static void BeginDescribe(void)
 // resting on Y/N, same law as the wall. The end of the list just stops.
 static void AdvanceAndLoad(void)
 {
-    if (g_sel < g_count - 1)
+    int n = StepSel(g_sel, +1);
+    if (n >= 0) { g_sel = n; LoadSelection(); }
+}
+
+// h: toggle hiding the voted rolls (yes's + no's). Rebuilds the list, keeps the
+// cursor on a visible roll, and persists the choice.
+static void ToggleHideVoted(void)
+{
+    g_hideVoted = !g_hideVoted;
+    WritePrivateProfileStringW(L"settings", L"bLatentHideVoted",
+                               g_hideVoted ? L"1" : L"0", g_plugin.GetConfigIniFile());
+    if (g_count && !RollVisible(g_sel))          // selection just got hidden
     {
-        g_sel++;
-        LoadSelection();
+        int n = StepSel(g_sel, +1);
+        if (n < 0) n = StepSel(g_sel, -1);
+        if (n >= 0) g_sel = n;
+    }
+    BuildDisplayList();
+    g_scroll = 0;
+}
+
+// Cast a like/pass, flow to the next roll, and - when filtering to unvoted-only
+// - drop the just-voted roll from view so voting steadily empties the list.
+static void VoteAndAdvance(int v)
+{
+    CastVote(&g_rolls[g_sel], v);
+    AdvanceAndLoad();
+    if (g_hideVoted)
+    {
+        if (!RollVisible(g_sel))                // voted the last visible roll
+        { int n = StepSel(g_sel, -1); if (n >= 0) { g_sel = n; LoadSelection(); } }
+        BuildDisplayList();
     }
 }
 
@@ -707,15 +764,17 @@ extern "C" int LatentBrowserHandleChar(int ch)
         switch (ch)
         {
         case 'y': case 'Y': case ' ':
-            CastVote(&g_rolls[g_sel], 1);
-            AdvanceAndLoad();
+            VoteAndAdvance(1);
             return 1;
         case 'n': case 'N':
-            CastVote(&g_rolls[g_sel], 0);
-            AdvanceAndLoad();
+            VoteAndAdvance(0);
             return 1;
         case 'u': case 'U':
             CastVote(&g_rolls[g_sel], -1);
+            return 1;
+        case 'h': case 'H':
+            ToggleHideVoted();
+            if (g_count && RollVisible(g_sel)) LoadSelection();
             return 1;
         case '1': case '2': case '3': case '4': case '5': case '6':
             ToggleTag(&g_rolls[g_sel], ch - '1');
@@ -768,17 +827,16 @@ extern "C" int LatentBrowserHandleKeydown(int vk)
     default:   // LB_BROWSE
         switch (vk)
         {
-        case VK_UP:     if (g_sel > 0)           { g_sel--; LoadSelection(); } return 1;
-        case VK_DOWN:   if (g_sel < g_count - 1) { g_sel++; LoadSelection(); } return 1;
+        case VK_UP:   { int n = StepSel(g_sel, -1); if (n >= 0) { g_sel = n; LoadSelection(); } } return 1;
+        case VK_DOWN: { int n = StepSel(g_sel, +1); if (n >= 0) { g_sel = n; LoadSelection(); } } return 1;
         case VK_PRIOR:
-            if (g_sel > 0) { g_sel -= 16; if (g_sel < 0) g_sel = 0; LoadSelection(); }
-            return 1;
+            { int n = g_sel; for (int k = 0; k < 16; k++) { int m = StepSel(n, -1); if (m < 0) break; n = m; }
+              if (n != g_sel) { g_sel = n; LoadSelection(); } } return 1;
         case VK_NEXT:
-            if (g_sel < g_count - 1)
-            { g_sel += 16; if (g_sel > g_count - 1) g_sel = g_count - 1; LoadSelection(); }
-            return 1;
-        case VK_HOME:   if (g_sel != 0)           { g_sel = 0;           LoadSelection(); } return 1;
-        case VK_END:    if (g_sel != g_count - 1 && g_count) { g_sel = g_count - 1; LoadSelection(); } return 1;
+            { int n = g_sel; for (int k = 0; k < 16; k++) { int m = StepSel(n, +1); if (m < 0) break; n = m; }
+              if (n != g_sel) { g_sel = n; LoadSelection(); } } return 1;
+        case VK_HOME: { int n = FirstVisible(); if (n >= 0 && n != g_sel) { g_sel = n; LoadSelection(); } } return 1;
+        case VK_END:  { int n = LastVisible();  if (n >= 0 && n != g_sel) { g_sel = n; LoadSelection(); } } return 1;
         case VK_RETURN: BeginDescribe(); return 1;
         case VK_ESCAPE: LatentBrowserClose(); return 1;
         default:
@@ -852,7 +910,8 @@ static void RenderLanding(IDirect3DDevice9* dev, int w, int h)
     LatText(L"Y / Space like   N pass   U clear vote",              x0, y, x1, y + line, 0xFFAACCEE); y += line;
     LatText(L"1-6 tags: organic geometric glitchy",                 x0, y, x1, y + line, 0xFFAACCEE); y += line;
     LatText(L"          watery sparkly ???",                        x0, y, x1, y + line, 0xFFAACCEE); y += line;
-    LatText(L"D / Enter describe   X / Esc close",                  x0, y, x1, y + line, 0xFFAACCEE); y += line * 2;
+    LatText(L"D / Enter describe   X / Esc close",                  x0, y, x1, y + line, 0xFFAACCEE); y += line;
+    LatText(L"p recolor (liked palettes)   h hide voted rolls",     x0, y, x1, y + line, 0xFFAACCEE); y += line * 2;
 
     LatText(L"Enter continues \x00b7 N = don't show this again",    x0, y, x1, y + line, 0xFFFFFFFF); y += line;
     LatText(L"Esc leaves",                                          x0, y, x1, y + line, 0xFFFFFFFF);
@@ -915,7 +974,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             int t;
             if ((t = LatTextW(L"Y like  N pass  U clr"))      > maxw) maxw = t;
             if ((t = LatTextW(L"1-6 tag  D descr"))           > maxw) maxw = t;
-            if ((t = LatTextW(L"p palette  X close"))         > maxw) maxw = t;
+            if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
             if ((t = LatTextW(L"LATENT 000/000  pal 00/00"))  > maxw) maxw = t;
         }
 
@@ -933,10 +992,12 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             if (g_palCycle > 0)
                 swprintf(buf, L"LATENT %d/%d  pal %d/%d",
                          g_sel + 1, g_count, g_palCycle, g_likedCount);
+            else if (g_hideVoted)
+                swprintf(buf, L"LATENT   %d/%d  unvoted", g_count ? g_sel + 1 : 0, g_count);
             else
                 swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
             LatText(buf, x0, line / 2, x1, line / 2 + line,
-                    (g_palCycle > 0) ? 0xFF70C0FF : 0xFFFFFFFF);
+                    (g_palCycle > 0) ? 0xFF70C0FF : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
             swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no",
                      nVote, nLike, nNo);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
@@ -944,7 +1005,8 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
             LatText(L"1-6 tag  D descr",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
-            LatText(L"p palette  X close",
+            LatText(g_hideVoted ? L"p pal  h show all  X close"
+                                : L"p pal  h hide voted  X close",
                     x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
         }
 
@@ -952,6 +1014,13 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         {
             LatText(L"No rolls yet - run tools\\latent_prospect, then latent_triage.ps1.",
                     x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
+        }
+        else if (g_dispCount == 0)   // all rolls voted, filter hides them
+        {
+            LatText(L"All rolls voted.",
+                    x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
+            LatText(L"Press h to show liked + passed again.",
+                    x0, headerH + rowH * 2, x1, headerH + rowH * 3, 0xFFCCCCCC);
         }
         else
         {

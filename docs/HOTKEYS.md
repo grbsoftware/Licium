@@ -72,7 +72,7 @@ the printable keys while they are up, so a tool key is shadowed there.
 |-----|--------|-------|
 | `b` / `B` | Bandit: roll a new preset | ID `L1-XXXX` = the seed; also on the Bandit menu |
 | `v` / `V` | Palettes: open the voting wall | modal while open — the wall eats ALL keys: arrows move, `Y`/`Space` like, `N`/`X` pass, `U` clear, `PgUp/PgDn` page, `V`/`Esc` close |
-| `x` / `X` | Latent: open the browser (the prospector's shelf) | modal while open — eats ALL keys: `↑↓` browse (loads live, hard cut), `PgUp/PgDn` jump, `Home/End` ends, `Y`/`Space` like, `N` pass, `U` clear, `1`–`6` quick-tags, `P` cycle this roll through green-lit palettes (own → each liked → own), `D`/`Enter` describe (engine waitstring; then only `Enter` save / `Esc` cancel are the browser's), `X`/`Esc` close. First open = landing page (`Enter`/`Space` continue, `N` never show again, `Esc` leave) |
+| `x` / `X` | Latent: open the browser (the prospector's shelf) | modal while open (eats ALL keys, so the global `h` hard-cut does NOT fire here) — list is newest-first (id descending). `↑↓` browse (loads live, hard cut), `PgUp/PgDn` jump, `Home/End` ends, `Y`/`Space` like, `N` pass, `U` clear, `1`–`6` quick-tags, `P` cycle this roll through green-lit palettes (own → each liked → own), `H` toggle hide-voted (show only the to-vote rolls; persisted), `D`/`Enter` describe (engine waitstring; then only `Enter` save / `Esc` cancel are the browser's), `X`/`Esc` close. First open = landing page (`Enter`/`Space` continue, `N` never show again, `Esc` leave) |
 
 ## Free for Licium tools
 
