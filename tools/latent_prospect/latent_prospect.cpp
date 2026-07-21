@@ -12,23 +12,23 @@
 // can only produce legal scalar HLSL.
 //
 // ---------------------------------------------------------------------------
-// LX2 ID CONTRACT (fixed spec — any change here bumps the genver again):
-//   * seed: 32 bits, ID printed as LX2-%08X.
-//   * LX1 -> LX2 (2026-07-18, Gary's multi-color request): PaletteOfSeed now
-//     advances deterministically to the next COLORFUL lib entry (two chromatic
-//     colors >= 60 deg apart in oklab hue, chroma >= 0.06), and the comp ramp
-//     grew to 4 stops (deep/s1/s2/accent). Grammar, screens, and the LCG
-//     stream are UNCHANGED — an LX1 id decodes to the same tree; only the
-//     dressing differs. LX1 .milk files on disk stay the archive of v1.
+// LX4 ID CONTRACT (fixed spec — any change here bumps the genver again):
+//   * seed: 32 bits, ID printed as LX%d-%08X (LX4).
+//   * LX3 -> LX4 (2026-07-21, rung 2 "open scaffold"): the fixed analytic
+//     medium (MediumOfSeed) is retired. A seed now grows TWO expressions and
+//     the buf0 velocity is the curl of the second (the flow potential psi), so
+//     the search reaches arbitrary flows and audio inside psi bends the motion.
+//     Decay widened to F(0.0, 0.992) (pure-plot..heavy-fluid ingredient). Old
+//     LX1/LX2/LX3 .milk files keep their own dressing and stay decodable-as-LXn.
 //   * RNG: LiciumRng::Seed32(seed) (licium_rng.h — 0x9E3779B9 ^ seed*2654435761).
-//   * Draw order: (1) decay = F(0.960, 0.992); (2) the tree, grown by
-//     GrowNode: ONE class draw (Next16 % 100) then ONE kind draw per node,
-//     children left -> right, depth-first. The class draw happens even at
-//     depths where the class is forced, so the stream never depends on
-//     context. CONST draws its value as I(-20,20)/10.
+//   * Draw order: (1) decay = F(0.0, 0.992); (2) the INK tree (root); (3) the
+//     PSI tree (root2). Each tree: GrowNode does ONE class draw (Next16 % 100)
+//     then ONE kind draw per node, children left -> right, depth-first. The
+//     class draw happens even where the class is forced, so the stream never
+//     depends on context. CONST draws its value as I(-20,20)/10.
 //   * Node kind ids: the NodeKind enum below is frozen.
 //   * Lens + palette are SIDE-HASHES of the seed (LensOfSeed / PaletteOfSeed),
-//     never the LCG stream — the tree is seed-pure.
+//     never the LCG stream — the trees are seed-pure.
 //   * The emitted template text below is part of the contract (byte-identical
 //     regen is the acceptance test).
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@
 #include "../../vis_milk2/licium_oklab.h"
 #include "../../vis_milk2/licium_palette_lib.h"
 
-#define LX_GENVER      3
+#define LX_GENVER      4
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
 #define LX_MAX_NODES   4096     // pool bound (depth cap keeps real trees far under this)
 #define LX_MAX_DEPTH   6        // grammar depth cap (guardrail lives in the TEMPLATE anyway)
@@ -74,11 +74,19 @@ struct Node
     int   l, r;     // pool indices, -1 = none
 };
 
+// LX4 (rung 2, 2026-07-21): a seed now grows TWO expressions into one pool —
+// root  = the ink field (WHERE ink appears), as in LX1..LX3;
+// root2 = the flow POTENTIAL psi. The medium is no longer a fixed analytic
+//         swirl (MediumOfSeed); the buf0 velocity is the curl of this evolved
+//         potential, so the FORMULA moves pixels and audio in psi bends the
+//         motion (not just brightness). This is Gary's "a shader is much more
+//         dynamic than this" — the open-scaffold rung.
 struct Tree
 {
     Node nodes[LX_MAX_NODES];
     int  count;
-    int  root;
+    int  root;      // ink field
+    int  root2;     // flow potential psi (LX4)
 };
 
 // ---- swarm mode (Gary, 2026-07-18 evening: revive the heritage doc's ACO
@@ -173,15 +181,21 @@ static int GrowNode(LiciumRng* rng, Tree* t, int depth, int parent, int slot)
     return i;
 }
 
-// The whole deterministic derivation from a seed: decay, then the tree.
+// The whole deterministic derivation from a seed (LX4): decay, then the ink
+// tree, then the flow-potential tree — fixed draw order so the stream is
+// context-free. LX4 widens decay from a narrow fluid band to the full
+// pure-plot..heavy-fluid ingredient range (Gary: "decay demoted from law to
+// ingredient" — feedback is one costume, not the constitution).
 static int BuildFromSeed(unsigned int seed, Tree* t, float* decay)
 {
     LiciumRng rng;
     rng.Seed32(seed);
-    *decay = rng.F(0.960f, 0.992f);
+    *decay = rng.F(0.0f, 0.992f);
     t->count = 0;
-    t->root = GrowNode(&rng, t, 0, SWARM_ROOT, 0);
-    return t->root >= 0;
+    t->root  = GrowNode(&rng, t, 0, SWARM_ROOT, 0);
+    if (t->root < 0) return 0;
+    t->root2 = GrowNode(&rng, t, 0, SWARM_ROOT, 0);   // psi flow potential
+    return t->root2 >= 0;
 }
 
 // Deposit a rated tree's links into the pheromone table.
@@ -273,7 +287,8 @@ static void LoadSwarmState(const char* stateDir, int* outDeposited, int* outFore
         Tree t;
         float decay;
         if (!BuildFromSeed(seed, &t, &decay)) continue;
-        DepositNode(&t, t.root, SWARM_ROOT, 0, w);
+        DepositNode(&t, t.root,  SWARM_ROOT, 0, w);
+        DepositNode(&t, t.root2, SWARM_ROOT, 0, w);   // LX4: psi links count too
         (*outDeposited)++;
     }
 }
@@ -388,6 +403,22 @@ static int TreeUses(const Tree* t, int kindLo, int kindHi)
     return 0;
 }
 
+// Per-subtree walkers — the pool holds both the ink tree and psi, so the
+// structural screens must ask about ONE root's subtree, not the whole pool.
+static int SubtreeUses(const Tree* t, int i, int kindLo, int kindHi)
+{
+    if (i < 0) return 0;
+    const Node* n = &t->nodes[i];
+    if (n->kind >= kindLo && n->kind <= kindHi) return 1;
+    return SubtreeUses(t, n->l, kindLo, kindHi) || SubtreeUses(t, n->r, kindLo, kindHi);
+}
+static int SubtreeSize(const Tree* t, int i)
+{
+    if (i < 0) return 0;
+    const Node* n = &t->nodes[i];
+    return 1 + SubtreeSize(t, n->l) + SubtreeSize(t, n->r);
+}
+
 // ---- screens ----------------------------------------------------------------
 // Two stages: a cheap coarse look (most seeds die here for pennies), then the
 // full-grid settle for survivors. Feedback is modeled per-cell WITHOUT
@@ -400,6 +431,26 @@ struct ScreenResult
     float dance;        // mean |lens(f)| change on an audio transient
     unsigned int hash;  // FNV-1a over the quantized settled field (look-space)
 };
+
+// The curl-of-psi velocity at one point, exactly as the shader builds it
+// (finite-difference gradient of root2, rotate 90, magnitude cap 3). Audio is
+// injected the same way the engine does (bass=mid=treb=aud in steady state).
+static void PsiVel(const Tree* t, float px, float py, float tt, float aud,
+                   float* vx, float* vy)
+{
+    const float e = 0.012f;
+    EvalCtx c; c.t = tt; c.bass = c.mid = c.treb = aud; c.fb = 0.0f;
+    c.px = px + e; c.py = py; float pxp = EvalNode(t, t->root2, &c);
+    c.px = px - e; c.py = py; float pxm = EvalNode(t, t->root2, &c);
+    c.px = px; c.py = py + e; float pyp = EvalNode(t, t->root2, &c);
+    c.px = px; c.py = py - e; float pym = EvalNode(t, t->root2, &c);
+    float dpsidx = (pxp - pxm) * (1.0f / (2.0f * e));
+    float dpsidy = (pyp - pym) * (1.0f / (2.0f * e));
+    float ux = dpsidy, uy = -dpsidx;
+    float vl = sqrtf(ux * ux + uy * uy);
+    float s = 3.0f / (vl + 0.0001f); if (s > 1.0f) s = 1.0f;
+    *vx = ux * s; *vy = uy * s;
+}
 
 // Settle the field at audio level 'aud'; write lens values into out[cells].
 static void SettleField(const Tree* t, int lens, float decay, int grid,
@@ -428,13 +479,40 @@ static void SettleField(const Tree* t, int lens, float decay, int grid,
 
 static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* res)
 {
-    // 1. Budget.
-    if (t->count < LX_MIN_SIZE || t->count > LX_MAX_SIZE) return 0;
+    // 1. Budget — per subtree now (the pool holds ink + psi).
+    int inkSz = SubtreeSize(t, t->root);
+    int psiSz = SubtreeSize(t, t->root2);
+    if (inkSz < LX_MIN_SIZE || inkSz > LX_MAX_SIZE) return 0;
+    if (psiSz < 3           || psiSz > LX_MAX_SIZE) return 0;
 
-    // 2. Structural musts: position (else it's a flat wash by construction)
-    //    and audio (the must-dance guarantee starts as a static screen).
-    if (!TreeUses(t, NK_PX, NK_PY))     return 0;
-    if (!TreeUses(t, NK_BASS, NK_TREB)) return 0;
+    // 2. Structural must: the INK field uses position (else a flat wash).
+    if (!SubtreeUses(t, t->root, NK_PX, NK_PY)) return 0;
+
+    // 3. The flow screen (LX4 rung 2 — this is the new must-dance). psi must
+    //    produce a REAL flow (nonzero curl somewhere) that AUDIO actually bends.
+    //    A structural "psi uses audio" check is not enough: audio that appears
+    //    additively (psi = p.x - treb) cancels in the gradient. So measure the
+    //    curl field numerically at two audio levels and require both motion and
+    //    audio sensitivity.
+    {
+        const int G = 8;
+        float flow = 0.0f, gdance = 0.0f;
+        for (int gy = 0; gy < G; gy++)
+        for (int gx = 0; gx < G; gx++)
+        {
+            float px = -1.0f + 2.0f * (gx + 0.5f) / G;
+            float py = -1.0f + 2.0f * (gy + 0.5f) / G;
+            float v0x, v0y, v1x, v1y;
+            PsiVel(t, px, py, 0.5f, 1.00f, &v0x, &v0y);
+            PsiVel(t, px, py, 0.5f, 1.35f, &v1x, &v1y);
+            flow   += sqrtf(v0x * v0x + v0y * v0y);
+            gdance += fabsf(v1x - v0x) + fabsf(v1y - v0y);
+        }
+        flow   /= (G * G);
+        gdance /= (G * G);
+        if (flow   < 0.12f) return 0;    // essentially still -> no motion
+        if (gdance < 0.03f) return 0;    // audio doesn't bend the flow
+    }
 
     // 3. Coarse look: 12x12, quick settle — kills flats/blacks/whites cheap.
     {
@@ -478,13 +556,14 @@ static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* r
     colVar = sqrtf(colVar / 32.0f);
     if (rowVar < 0.015f || colVar < 0.015f) return 0;
 
-    // Must-dance: an audio transient (bass 1.0 -> 1.35, the in-engine scale of
-    // a real beat over the relative baseline) must visibly move the field.
+    // Ink audio-response (informational): audio now bends GEOMETRY, not the ink
+    // field, so this no longer gates — it only rewards an ink field that also
+    // happens to respond. The must-dance guarantee moved to the psi-uses-audio
+    // structural screen above.
     SettleField(t, lens, decay, 32, 1.35f, 0.5f, f1);
     float dance = 0.0f;
     for (int i = 0; i < 32 * 32; i++) dance += fabsf(f1[i] - f0[i]);
     dance /= 32.0f * 32.0f;
-    if (dance < 0.01f) return 0;
 
     // Look-space hash: FNV-1a over the quantized settled field. Dedup by what
     // it LOOKS like, not how the chain is written.
@@ -566,6 +645,11 @@ struct Str
     }
 };
 
+// Position variable the emitted expression reads for p.x/p.y. Normally "p"
+// (the pixel), but psi is emitted as a function of "q" so the shader can
+// finite-difference it at neighbour offsets to form the curl velocity.
+static const char* g_posVar = "p";
+
 // Infix with explicit parens; spaces around binary ops so the line-splitter
 // below always has a safe break point. Mirrors EvalNode exactly.
 static void EmitExpr(const Tree* t, int i, Str* s)
@@ -585,8 +669,8 @@ static void EmitExpr(const Tree* t, int i, Str* s)
     case NK_FRAC:s->Raw("frac("); EmitExpr(t, n->l, s); s->Raw(")"); break;
     case NK_FLOOR:s->Raw("floor("); EmitExpr(t, n->l, s); s->Raw(")"); break;
     case NK_NEG: s->Raw("(-"); EmitExpr(t, n->l, s); s->Raw(")"); break;
-    case NK_PX:  s->Raw("p.x"); break;
-    case NK_PY:  s->Raw("p.y"); break;
+    case NK_PX:  s->Raw(g_posVar); s->Raw(".x"); break;
+    case NK_PY:  s->Raw(g_posVar); s->Raw(".y"); break;
     case NK_TIME:s->Raw("tt"); break;
     case NK_BASS:s->Raw("bass_att"); break;
     case NK_MID: s->Raw("mid_att"); break;
@@ -631,28 +715,13 @@ static void EmitShaderLinesSplit(Str* out, const char* prefix, const char* body)
     }
 }
 
-// ---- rung 1 (LX3, 2026-07-19): the medium is rolled, not fixed --------------
-// Gary's n=273 readout on LX2 ("every single one spirals in the same
-// direction"): the grammar only ever decorated ONE hard-coded swirl field.
-// A side-hash of the seed (never the tree's LCG stream — same seed still
-// grows the same formula as LX2) now picks the velocity archetype, field
-// scale, tempo, and spin direction: 4*3*3*2 = 72 mediums. The archetypes are
-// Bandit's four divergence-free curls (vel = (dphi/dy, -dphi/dx)) — the
-// af6df86 variety lesson, applied to Latent's scaffold.
-static void MediumOfSeed(unsigned int seed, int* arche, float* scale,
-                         float* speed, float* dir)
-{
-    unsigned int mh = (seed ^ 0x4D454431u) * 2654435761u;   // 'MED1' salt
-    *arche = (int)((mh >> 3) & 3);
-    *scale = 1.30f + 1.25f * (float)((mh >> 5) % 3);        // 1.30 2.55 3.80
-    *speed = 0.12f + 0.11f * (float)((mh >> 7) % 3);        // 0.12 0.23 0.34
-    *dir   = ((mh >> 9) & 1) ? 1.0f : -1.0f;
-}
-static const char* MediumName(int arche)
-{
-    static const char* names[4] = { "swirl", "lattice", "stream", "driftweave" };
-    return names[arche & 3];
-}
+// ---- rung 1 -> rung 2 (LX3 -> LX4) ------------------------------------------
+// LX3 rolled the medium from a FIXED menu of 4 analytic swirls (MediumOfSeed).
+// Gary's rung-2 critique ("a shader is much more dynamic than this; all the
+// music is on brightness") retired that menu: LX4's medium is the curl of an
+// EVOLVED flow potential (root2), so the search reaches arbitrary flows and
+// audio bends them. MediumOfSeed is gone; the velocity is built in EmitPreset
+// from psi. (LX1..LX3 .milk files keep their own fixed-medium dressing.)
 
 // Palette override (browser palette-cycling, 2026-07-21): when set, EmitPreset
 // dresses with these exact colors instead of the seed's lib pick — the roll's
@@ -718,17 +787,17 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
     out->Add("warp=0.00000");
     out->Add("buf0_iterations=1");
 
-    // --- buf0: fixed medium, evolved ink -------------------------------------
-    // The template is the guardrail: gentle fixed swirl (divergence-free curl),
-    // decay, equilibrium-scaled injection, hue-preserving clamp. The evolved
-    // tree only shapes WHERE ink appears. fb is read at uv (pre-advection),
-    // matching the CPU interpreter's feedback model.
+    // --- buf0: EVOLVED medium, evolved ink (LX4 rung 2) ----------------------
+    // The template is the guardrail (decay, injection, clamp, velocity cap) but
+    // the MOTION is no longer a fixed swirl: velocity = curl of an evolved flow
+    // potential psi (root2), finite-differenced in the shader. Audio inside psi
+    // bends the flow (screens require it), so music changes SHAPE, not just
+    // brightness. The ink tree (root) still shapes WHERE ink appears. fb/tt/
+    // audio are read once (center values) and shared across the psi neighbour
+    // evals — psi is a spatial potential; per-pixel fb only tints it slightly.
     {
         Str body;
         body.Init();
-        Str expr;
-        expr.Init();
-        EmitExpr(t, t->root, &expr);
 
         body.Raw("shader_body\n{\n");
         body.Raw("float2 p = (uv - 0.5) * float2(texsize.x*texsize.w, 1.0) * 2.0;\n");
@@ -736,48 +805,31 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         body.Raw("float3 prevc = tex2D(sampler_buf0, uv).xyz;\n");
         body.Raw("float fb = dot(prevc, float3(0.32, 0.49, 0.29));\n");
         body.Raw("float f = ");
-        body.Raw(expr.buf ? expr.buf : "0.0");
+        g_posVar = "p";
+        EmitExpr(t, t->root, &body);
         body.Raw(";\n");
         if (lens == 0)      body.Raw("f = saturate(f);\n");
         else if (lens == 1) body.Raw("f = saturate(abs(f));\n");
         else                body.Raw("f = saturate(1.0 - abs(f));\n");
-        {
-            int arche; float fscale, fspeed, fdir;
-            MediumOfSeed(seed, &arche, &fscale, &fspeed, &fdir);
-            char l[256];
-            _snprintf(l, sizeof(l) - 1, "float tm = time * %.5f;\nfloat fa = %.5f;\n",
-                      fspeed, fscale);
-            l[sizeof(l) - 1] = 0;
-            body.Raw(l);
-            switch (arche)
-            {
-            default:
-            case 0: // SWIRL — one dominant rotation cell (the LX2 medium's family)
-                body.Raw("float s1 = sin(p.x*fa + tm), c1 = cos(p.x*fa + tm);\n"
-                         "float s2 = sin(p.y*fa*0.8 - tm*0.7), c2 = cos(p.y*fa*0.8 - tm*0.7);\n"
-                         "float c3 = cos((p.x + p.y)*fa*0.6 + tm*1.3);\n"
-                         "float dphidx = fa*c1*c2 + 0.3*fa*c3;\n"
-                         "float dphidy = -fa*0.8*s1*s2 + 0.3*fa*c3;\n");
-                break;
-            case 1: // LATTICE — counter-rotating cells, dye weaves between them
-                body.Raw("float dphidx = fa*cos(p.x*fa + tm)*sin(p.y*fa - tm*0.8);\n"
-                         "float dphidy = fa*sin(p.x*fa + tm)*cos(p.y*fa - tm*0.8);\n");
-                break;
-            case 2: // STREAM — meandering horizontal jet, vertical wander
-                body.Raw("float dphidx = -0.2*fa*sin(p.x*fa*0.5 + tm*0.8);\n"
-                         "float dphidy = -1.8*fa*sin(p.y*fa*1.5 - tm);\n");
-                break;
-            case 3: // DRIFT-WEAVE — the lattice plus steady linear drift
-                body.Raw("float dphidx = 0.6*fa*cos(p.x*fa + tm)*sin(p.y*fa - tm*0.8) + 1.1;\n"
-                         "float dphidy = 0.6*fa*sin(p.x*fa + tm)*cos(p.y*fa - tm*0.8);\n");
-                break;
-            }
-            // /fa: tempo must not ride the cell size; *fdir: mirrored spin twin
-            _snprintf(l, sizeof(l) - 1,
-                      "float2 vel = float2(dphidy, -dphidx) * %.5f;\n", 2.2f * fdir / fscale);
-            l[sizeof(l) - 1] = 0;
-            body.Raw(l);
-        }
+
+        // Evolved flow potential psi -> divergence-free curl velocity.
+        body.Raw("float e = 0.012;\n");
+        body.Raw("float2 pxp = p + float2(e,0.0);  float2 pxm = p - float2(e,0.0);\n");
+        body.Raw("float2 pyp = p + float2(0.0,e);  float2 pym = p - float2(0.0,e);\n");
+        body.Raw("float dpsidx = ((");
+        g_posVar = "pxp"; EmitExpr(t, t->root2, &body);
+        body.Raw(") - (");
+        g_posVar = "pxm"; EmitExpr(t, t->root2, &body);
+        body.Raw(")) * (1.0/(2.0*e));\n");
+        body.Raw("float dpsidy = ((");
+        g_posVar = "pyp"; EmitExpr(t, t->root2, &body);
+        body.Raw(") - (");
+        g_posVar = "pym"; EmitExpr(t, t->root2, &body);
+        body.Raw(")) * (1.0/(2.0*e));\n");
+        g_posVar = "p";
+        body.Raw("float2 vel = float2(dpsidy, -dpsidx);\n");
+        body.Raw("float vl = length(vel);\n");
+        body.Raw("vel *= min(1.0, 3.0/(vl + 0.0001));\n");   // cap: no off-screen leaps
         body.Raw("float2 suv = uv - vel * 0.0035;\n");
         body.Raw("float3 prev = tex2D(sampler_buf0, suv).xyz;\n");
         {
@@ -794,7 +846,6 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         }
         body.Raw("ret = acc;\n}");
         EmitShaderLinesSplit(out, "buf0", body.buf ? body.buf : "");
-        expr.Free();
         body.Free();
     }
 
@@ -1004,12 +1055,23 @@ int main(int argc, char** argv)
         float decay;
         if (!BuildFromSeed(single, &t, &decay)) { printf("grow failed (pool bound)\n"); return 1; }
         printf("LX%d-%08X\n", LX_GENVER, single);
-        printf("  decay = %.5f  lens = %d  palette = %d  nodes = %d\n",
-               decay, LensOfSeed(single), PaletteOfSeed(single), t.count);
-        printf("  chain: ");
+        printf("  decay = %.5f  lens = %d  palette = %d  nodes = %d (ink %d / psi %d)\n",
+               decay, LensOfSeed(single), PaletteOfSeed(single), t.count,
+               SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2));
+        printf("  ink chain: ");
         PrintChain(&t, t.root);
+        printf("\n  psi chain: ");
+        PrintChain(&t, t.root2);
         printf("\n");
-        PrintInfix(&t);
+        {
+            Str s; s.Init();
+            g_posVar = "p"; EmitExpr(&t, t.root, &s);
+            printf("  f   = %s\n", s.buf ? s.buf : "?");
+            s.len = 0; if (s.buf) s.buf[0] = 0;
+            EmitExpr(&t, t.root2, &s);
+            printf("  psi = %s\n", s.buf ? s.buf : "?");
+            s.Free();
+        }
         return 0;
     }
 
@@ -1023,13 +1085,10 @@ int main(int argc, char** argv)
         int pass = ScreenCandidate(&t, LensOfSeed(single), decay, &r);
         char path[1024];
         if (!EmitRollFile(single, outdir, path, sizeof(path), outfile)) { printf("emit failed\n"); return 1; }
-        {
-            int arche; float fscale, fspeed, fdir;
-            MediumOfSeed(single, &arche, &fscale, &fspeed, &fdir);
-            printf("LX%d-%08X  medium=%s a=%.2f spd=%.2f dir=%c  nodes=%d  screen=%s",
-                   LX_GENVER, single, MediumName(arche), fscale, fspeed,
-                   (fdir > 0) ? '+' : '-', t.count, pass ? "PASS" : "reject");
-        }
+        printf("LX%d-%08X  decay=%.4f lens=%d  ink=%d psi=%d nodes  screen=%s",
+               LX_GENVER, single, decay, LensOfSeed(single),
+               SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2),
+               pass ? "PASS" : "reject");
         if (pass) printf("  score=%.4f dance=%.4f", r.score, r.dance);
         printf("\n  emitted (forced): %s\n", path);
         return 0;
