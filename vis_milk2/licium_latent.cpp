@@ -371,8 +371,11 @@ static void SaveNote(LatentRoll* r, const wchar_t* text)
 
 // ================================ the browser ================================
 
+static int g_palCycle = 0;   // 0 = roll's own palette; 1..N = liked-palette index
+
 static void LoadSelection(void)
 {
+    g_palCycle = 0;                                       // new roll -> own palette
     if (g_count > 0)
         g_plugin.LoadPreset(g_rolls[g_sel].file, 0.0f);   // hard cut: live browse
 }
@@ -449,6 +452,115 @@ static void AdvanceAndLoad(void)
     }
 }
 
+// ---- palette cycling (Gary, 2026-07-21) -------------------------------------
+// "cycle between palettes I've green lit ... some of these would look better
+// with different ones." Per-file, never global. Pressing p re-dresses THIS
+// roll with the next liked palette (from the Palettes pillar's votes) by
+// re-emitting the roll's seed through latent_prospect --palette-colors into a
+// throwaway _palcycle.milk, then hard-cut loading it. p walks
+// [own, liked0, liked1, ...] and wraps back to own; moving off the roll resets.
+// Exact for the current lineage (LX3); older/swarm seeds re-render in LX3 with
+// the chosen palette (the LX4 runtime-palette work will make it exact for all).
+#define LAT_MAX_LIKED 512
+static char g_likedPal[LAT_MAX_LIKED][48];   // "RRGGBB,RRGGBB,..." emitter arg form
+static int  g_likedCount  = 0;
+static int  g_likedLoaded = 0;
+
+static void LoadLikedPalettes(void)
+{
+    if (g_likedLoaded) return;
+    g_likedLoaded = 1;
+    g_likedCount  = 0;
+
+    wchar_t path[MAX_PATH];
+    swprintf(path, L"%spalette_votes.txt", g_plugin.m_szMilkdrop2Path);
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+
+    // later-wins per color-list: upsert into a small keyed table, keep vote==1.
+    static char keyStr[2048][48];
+    static int  keyVote[2048];
+    int nk = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f))
+    {
+        char colpart[64]; int vote;
+        if (sscanf(line, "%63s %d", colpart, &vote) != 2) continue;
+        char emit[48]; int e = 0;
+        for (char* c = colpart; *c && e < 47; c++)
+            if (*c != '#') emit[e++] = *c;               // "#RRGGBB,..." -> "RRGGBB,..."
+        emit[e] = 0;
+        if (!e) continue;
+        int k = -1;
+        for (int i = 0; i < nk; i++) if (!strcmp(keyStr[i], emit)) { k = i; break; }
+        if (k < 0 && nk < 2048) { k = nk++; strncpy(keyStr[k], emit, 47); keyStr[k][47] = 0; }
+        if (k >= 0) keyVote[k] = vote;                   // later line wins
+    }
+    fclose(f);
+
+    for (int i = 0; i < nk && g_likedCount < LAT_MAX_LIKED; i++)
+        if (keyVote[i] == 1)
+        {
+            strncpy(g_likedPal[g_likedCount], keyStr[i], 47);
+            g_likedPal[g_likedCount][47] = 0;
+            g_likedCount++;
+        }
+}
+
+// Repo-root\tools\latent_prospect\latent_prospect.exe (same hop law as the
+// search script). Returns 0 if not found.
+static int ResolveEmitter(wchar_t* out /*MAX_PATH*/)
+{
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    for (int hop = 0; hop < 3; hop++)   // strip Licium.exe, Release, vis_milk2
+    {
+        wchar_t* slash = wcsrchr(exe, L'\\');
+        if (!slash) return 0;
+        *slash = 0;
+    }
+    swprintf(out, L"%s\\tools\\latent_prospect\\latent_prospect.exe", exe);
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void CyclePalette(void)
+{
+    if (g_count == 0) return;
+    LoadLikedPalettes();
+    if (g_likedCount == 0) return;                       // nothing greenlit yet
+
+    g_palCycle = (g_palCycle + 1) % (g_likedCount + 1);
+    LatentRoll* r = &g_rolls[g_sel];
+
+    if (g_palCycle == 0) { g_plugin.LoadPreset(r->file, 0.0f); return; }  // back to own
+
+    const wchar_t* dash = wcsrchr(r->id, L'-');
+    if (!dash) return;
+    unsigned int seed = (unsigned int)wcstoul(dash + 1, NULL, 16);
+
+    wchar_t emitter[MAX_PATH];
+    if (!ResolveEmitter(emitter)) return;
+
+    wchar_t temp[MAX_PATH];
+    swprintf(temp, L"%s_palcycle.milk", g_rollsDir);     // not latent_* -> never scanned
+
+    wchar_t cmd[1024];
+    swprintf(cmd, L"\"%s\" --seed %08X --outfile \"%s\" --palette-colors %S",
+             emitter, seed, temp, g_likedPal[g_palCycle - 1]);
+
+    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    {
+        WaitForSingleObject(pi.hProcess, 5000);          // single-seed emit is fast
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (GetFileAttributesW(temp) != INVALID_FILE_ATTRIBUTES)
+            g_plugin.LoadPreset(temp, 0.0f);             // hard cut to the re-dress
+    }
+}
+
 extern "C" int LatentBrowserHandleChar(int ch)
 {
     switch (g_state)
@@ -498,6 +610,9 @@ extern "C" int LatentBrowserHandleChar(int ch)
             return 1;
         case '1': case '2': case '3': case '4': case '5': case '6':
             ToggleTag(&g_rolls[g_sel], ch - '1');
+            return 1;
+        case 'p': case 'P':
+            CyclePalette();
             return 1;
         case 'd': case 'D':
             BeginDescribe();
@@ -664,7 +779,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         // draws over the live roll, not ellipsized (see RenderLanding note).
         int line    = h / 30;
         if (line < 15) line = 15;
-        int headerH = line * 4 + line / 2;
+        int headerH = line * 5 + line / 2;
         int rowH    = line + 2;
         int x0 = 10, x1 = (int)panelW - 10;
 
@@ -679,15 +794,23 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 else if (g == 1) nLike++;
                 else             nNo++;
             }
-            swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
-            LatText(buf, x0, line / 2, x1, line / 2 + line, 0xFFFFFFFF);
+            // Title, and the live palette-cycle state when re-dressing this roll.
+            if (g_palCycle > 0)
+                swprintf(buf, L"LATENT %d/%d  pal %d/%d",
+                         g_sel + 1, g_count, g_palCycle, g_likedCount);
+            else
+                swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
+            LatText(buf, x0, line / 2, x1, line / 2 + line,
+                    (g_palCycle > 0) ? 0xFF70C0FF : 0xFFFFFFFF);
             swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no",
                      nVote, nLike, nNo);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
             LatText(L"Y like  N pass  U clr",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
-            LatText(L"1-6 tag  D descr  X",
+            LatText(L"1-6 tag  D descr",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
+            LatText(L"p palette  X close",
+                    x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
         }
 
         if (g_count == 0)

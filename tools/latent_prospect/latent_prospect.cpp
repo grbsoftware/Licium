@@ -654,21 +654,29 @@ static const char* MediumName(int arche)
     return names[arche & 3];
 }
 
+// Palette override (browser palette-cycling, 2026-07-21): when set, EmitPreset
+// dresses with these exact colors instead of the seed's lib pick — the roll's
+// tree/lens/medium are unchanged, only the palette differs. Set from
+// --palette-colors; g_palOverrideN == 0 means "use the seed's palette".
+static int          g_palOverrideN = 0;
+static unsigned int g_palOverride[5];
+
 static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
 {
     const int lens = LensOfSeed(seed);
     const int pi   = PaletteOfSeed(seed);
 
-    // Palette: curated lib pick -> luminance-sort -> the LS2 dressing law
-    // (deep = darkest*0.30 tinted floor, mid = middle, accent = brightest).
+    // Palette: curated lib pick (or an explicit override) -> luminance-sort ->
+    // the LS2 dressing law (deep = darkest*0.30 tinted floor, mid, accent).
     const LiciumLibPalette* lp = &LICIUM_PAL_LIB[pi];
     float rgb[5][3];
-    int pn = lp->n;
+    int pn = g_palOverrideN ? g_palOverrideN : lp->n;
     for (int i = 0; i < pn; i++)
     {
-        rgb[i][0] = ((lp->c[i] >> 16) & 0xFF) / 255.0f;
-        rgb[i][1] = ((lp->c[i] >> 8)  & 0xFF) / 255.0f;
-        rgb[i][2] = ( lp->c[i]        & 0xFF) / 255.0f;
+        unsigned int c = g_palOverrideN ? g_palOverride[i] : lp->c[i];
+        rgb[i][0] = ((c >> 16) & 0xFF) / 255.0f;
+        rgb[i][1] = ((c >> 8)  & 0xFF) / 255.0f;
+        rgb[i][2] = ( c        & 0xFF) / 255.0f;
     }
     for (int i = 1; i < pn; i++)
         for (int j = i; j > 0 && LicSrgbLum(rgb[j]) < LicSrgbLum(rgb[j - 1]); j--)
@@ -882,7 +890,8 @@ static int WriteBytes(const char* path, const char* data, size_t len)
     return w == len;
 }
 
-static int EmitRollFile(unsigned int seed, const char* outdir, char* pathOut, size_t pathCap)
+static int EmitRollFile(unsigned int seed, const char* outdir, char* pathOut, size_t pathCap,
+                        const char* forcePath = NULL)
 {
     Tree t;
     float decay;
@@ -891,7 +900,14 @@ static int EmitRollFile(unsigned int seed, const char* outdir, char* pathOut, si
     s.Init();
     if (!s.buf) return 0;
     EmitPreset(seed, &t, decay, &s);
-    _snprintf(pathOut, pathCap - 1, "%s\\latent_%s-%08X.milk", outdir, LineageStr(), seed);
+    if (forcePath)
+    {
+        _snprintf(pathOut, pathCap - 1, "%s", forcePath);   // exact path (palette re-dress)
+    }
+    else
+    {
+        _snprintf(pathOut, pathCap - 1, "%s\\latent_%s-%08X.milk", outdir, LineageStr(), seed);
+    }
     pathOut[pathCap - 1] = 0;
     int ok = WriteBytes(pathOut, s.buf, s.len);
     s.Free();
@@ -945,10 +961,25 @@ int main(int argc, char** argv)
     int nThreads = 0;                  // 0 = auto (cores - 2, min 1)
     const char* outdir = NULL;
     const char* swarmDir = NULL;       // --swarm <Licium state dir> = LXS1 mode
+    const char* outfile = NULL;        // --outfile PATH: exact path for --seed
 
     for (int i = 1; i < argc; i++)
     {
         if (!strcmp(argv[i], "--selftest")) return SelfTest() ? 0 : 1;
+        else if (!strcmp(argv[i], "--outfile") && i + 1 < argc) outfile = argv[++i];
+        else if (!strcmp(argv[i], "--palette-colors") && i + 1 < argc)
+        {
+            // "RRGGBB,RRGGBB,..." (1-5) — re-dress a roll with an exact palette.
+            g_palOverrideN = 0;
+            const char* s = argv[++i];
+            while (*s && g_palOverrideN < 5)
+            {
+                g_palOverride[g_palOverrideN++] = (unsigned int)strtoul(s, NULL, 16);
+                const char* comma = strchr(s, ',');
+                if (!comma) break;
+                s = comma + 1;
+            }
+        }
         else if (!strcmp(argv[i], "--decode") && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveDecode = 1; }
         else if (!strcmp(argv[i], "--seed")   && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveSingle = 1; }
         else if (!strcmp(argv[i], "--start")  && i + 1 < argc) start  = (unsigned int)strtoul(argv[++i], NULL, 0);
@@ -984,14 +1015,14 @@ int main(int argc, char** argv)
 
     if (haveSingle)
     {
-        if (!outdir) { printf("--seed needs --outdir\n"); return 1; }
+        if (!outdir && !outfile) { printf("--seed needs --outdir or --outfile\n"); return 1; }
         Tree t;
         float decay;
         if (!BuildFromSeed(single, &t, &decay)) { printf("grow failed\n"); return 1; }
         ScreenResult r;
         int pass = ScreenCandidate(&t, LensOfSeed(single), decay, &r);
         char path[1024];
-        if (!EmitRollFile(single, outdir, path, sizeof(path))) { printf("emit failed\n"); return 1; }
+        if (!EmitRollFile(single, outdir, path, sizeof(path), outfile)) { printf("emit failed\n"); return 1; }
         {
             int arche; float fscale, fspeed, fdir;
             MediumOfSeed(single, &arche, &fscale, &fspeed, &fdir);

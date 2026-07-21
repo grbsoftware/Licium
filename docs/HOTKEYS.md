@@ -72,13 +72,15 @@ the printable keys while they are up, so a tool key is shadowed there.
 |-----|--------|-------|
 | `b` / `B` | Bandit: roll a new preset | ID `L1-XXXX` = the seed; also on the Bandit menu |
 | `v` / `V` | Palettes: open the voting wall | modal while open — the wall eats ALL keys: arrows move, `Y`/`Space` like, `N`/`X` pass, `U` clear, `PgUp/PgDn` page, `V`/`Esc` close |
-| `x` / `X` | Latent: open the browser (the prospector's shelf) | modal while open — eats ALL keys: `↑↓` browse (loads live, hard cut), `PgUp/PgDn` jump, `Home/End` ends, `Y`/`Space` like, `N` pass, `U` clear, `1`–`6` quick-tags, `D`/`Enter` describe (engine waitstring; then only `Enter` save / `Esc` cancel are the browser's), `X`/`Esc` close. First open = landing page (`Enter`/`Space` continue, `N` never show again, `Esc` leave) |
+| `x` / `X` | Latent: open the browser (the prospector's shelf) | modal while open — eats ALL keys: `↑↓` browse (loads live, hard cut), `PgUp/PgDn` jump, `Home/End` ends, `Y`/`Space` like, `N` pass, `U` clear, `1`–`6` quick-tags, `P` cycle this roll through green-lit palettes (own → each liked → own), `D`/`Enter` describe (engine waitstring; then only `Enter` save / `Esc` cancel are the browser's), `X`/`Esc` close. First open = landing page (`Enter`/`Space` continue, `N` never show again, `Esc` leave) |
 
 ## Free for Licium tools
 
-- **Letters (global WM_CHAR):** `c` `p` `z` (upper+lower).
+- **Letters (global WM_CHAR):** `c` `z` (upper+lower).
   (`b`, `v` and `x` are now taken — Bandit, the Palettes wall, and the Latent
-  browser, above; `p` freed up since Palettes took `v`.)
+  browser, above. `p` is now the Latent browser's palette-cycle key — it is
+  modal-only (active while the browser is open), so `p` is still free as a
+  GLOBAL binding, but prefer not to reuse it to avoid confusion.)
 - **Function keys:** `F10`–`F12` (F10 activates the menu bar by Windows
   convention — prefer F11/F12).
 - **Ctrl chords:** the engine binds no Ctrl+letter combos in the standalone
