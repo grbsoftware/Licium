@@ -626,6 +626,41 @@ void CPluginShell::CleanUpFonts()
 		SafeRelease(m_d3dx_font[i]);
 }
 
+#ifdef MILKDROP_STANDALONE
+// GDI-exact text width in a given overlay font. Uses the real m_fontinfo (face,
+// style, and the actual scaled nSize the D3DX font was built at), so panels that
+// size to this stay correct as the UI text scale changes. A 1-slot HFONT cache
+// keyed on the size avoids recreating the font every call.
+int CPluginShell::HostMeasureTextW(const wchar_t* s, eFontIndex idx)
+{
+	if (idx < 0 || idx >= NUM_BASIC_FONTS + NUM_EXTRA_FONTS || !s) return 0;
+	const td_fontinfo* fi = &m_fontinfo[idx];
+
+	static HFONT s_hf = NULL;
+	static int   s_size = 0, s_idx = -1, s_bold = -1, s_ital = -1;
+	if (!s_hf || s_size != fi->nSize || s_idx != idx ||
+	    s_bold != fi->bBold || s_ital != fi->bItalic)
+	{
+		if (s_hf) DeleteObject(s_hf);
+		s_hf = CreateFontW(fi->nSize, 0, 0, 0, fi->bBold ? 900 : 400, fi->bItalic,
+		                   FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+		                   CLIP_DEFAULT_PRECIS,
+		                   fi->bAntiAliased ? ANTIALIASED_QUALITY : DEFAULT_QUALITY,
+		                   DEFAULT_PITCH, fi->szFace);
+		s_size = fi->nSize; s_idx = idx; s_bold = fi->bBold; s_ital = fi->bItalic;
+	}
+	if (!s_hf) return 0;
+
+	HDC dc = GetDC(NULL);
+	HFONT old = (HFONT)SelectObject(dc, s_hf);
+	SIZE sz = { 0, 0 };
+	GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
+	SelectObject(dc, old);
+	ReleaseDC(NULL, dc);
+	return sz.cx;
+}
+#endif
+
 void CPluginShell::AllocateTextSurface()
 {
 	IDirect3DDevice9 *pDevice = m_vjd3d9_device ? m_vjd3d9_device : GetDevice();

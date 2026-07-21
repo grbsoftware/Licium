@@ -100,6 +100,12 @@ protected:
 public:
     LPD3DXFONT   GetFont(eFontIndex idx);       // returns a D3DX font handle for drawing text; see shell_defines.h for the definition of the 'eFontIndex' enum.
     int          GetFontHeight(eFontIndex idx); // returns the height of the font, in pixels; see shell_defines.h for the definition of the 'eFontIndex' enum.
+#ifdef MILKDROP_STANDALONE
+    // Pixel width of a wide string in the given overlay font (GDI-exact on the
+    // real font info, so it tracks the live UI text scale). Lets on-canvas
+    // panels size themselves to the lettering instead of guessing.
+    int          HostMeasureTextW(const wchar_t* s, eFontIndex idx);
+#endif
     CTextManager m_text;
 protected:
 

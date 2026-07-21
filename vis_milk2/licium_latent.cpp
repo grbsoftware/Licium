@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 
 extern CPlugin g_plugin;
 
@@ -455,14 +456,20 @@ static void AdvanceAndLoad(void)
 // ---- palette cycling (Gary, 2026-07-21) -------------------------------------
 // "cycle between palettes I've green lit ... some of these would look better
 // with different ones." Per-file, never global. Pressing p re-dresses THIS
-// roll with the next liked palette (from the Palettes pillar's votes) by
-// re-emitting the roll's seed through latent_prospect --palette-colors into a
-// throwaway _palcycle.milk, then hard-cut loading it. p walks
+// roll with the next liked palette (from the Palettes pillar's votes). p walks
 // [own, liked0, liked1, ...] and wraps back to own; moving off the roll resets.
-// Exact for the current lineage (LX3); older/swarm seeds re-render in LX3 with
-// the chosen palette (the LX4 runtime-palette work will make it exact for all).
+//
+// It RECOLORS THE EXISTING .milk IN PLACE — it swaps only the palette-derived
+// color literals (buf0 ink injection + the comp ramp stops + the sheen tint)
+// and leaves the tree, medium and DECAY exactly as they were. The first cut at
+// this re-emitted the seed through the current grammar instead, which regrew a
+// DIFFERENT shader (and, when the new roll drew a near-zero decay, one with no
+// feedback smear at all — Gary's "flashes with no smearing"). Recoloring the
+// dressing block is exact for LX2+ (four ramp stops), best-effort for LX1
+// (three stops), and works on every lineage because the dressing block is
+// identical across them. No subprocess, so the cut is instant.
 #define LAT_MAX_LIKED 512
-static char g_likedPal[LAT_MAX_LIKED][48];   // "RRGGBB,RRGGBB,..." emitter arg form
+static char g_likedPal[LAT_MAX_LIKED][48];   // "RRGGBB,RRGGBB,..." packed-hex list
 static int  g_likedCount  = 0;
 static int  g_likedLoaded = 0;
 
@@ -507,20 +514,139 @@ static void LoadLikedPalettes(void)
         }
 }
 
-// Repo-root\tools\latent_prospect\latent_prospect.exe (same hop law as the
-// search script). Returns 0 if not found.
-static int ResolveEmitter(wchar_t* out /*MAX_PATH*/)
+// Parse a "RRGGBB,RRGGBB,..." liked-palette entry into up to 5 packed-RGB ints.
+static int ParseLikedPal(const char* s, unsigned int out[5])
 {
-    wchar_t exe[MAX_PATH];
-    GetModuleFileNameW(NULL, exe, MAX_PATH);
-    for (int hop = 0; hop < 3; hop++)   // strip Licium.exe, Release, vis_milk2
+    int n = 0;
+    while (*s && n < 5)
     {
-        wchar_t* slash = wcsrchr(exe, L'\\');
-        if (!slash) return 0;
-        *slash = 0;
+        char hex[8]; int h = 0;
+        while (*s && *s != ',' && h < 7) hex[h++] = *s++;
+        hex[h] = 0;
+        if (h) out[n++] = (unsigned int)strtoul(hex, NULL, 16);
+        if (*s == ',') s++;
     }
-    swprintf(out, L"%s\\tools\\latent_prospect\\latent_prospect.exe", exe);
-    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+    return n;
+}
+
+// Perceived luminance for the deep->accent sort — Rec.601 gamma weights, the
+// same LicSrgbLum the emitter dresses with (kept in sync by hand; trivial).
+static float PalLum(const float* rgb)
+{
+    return 0.32f*rgb[0] + 0.49f*rgb[1] + 0.29f*rgb[2];
+}
+
+// The Latent dressing law, replicated from latent_prospect's EmitPreset
+// (luminance sort -> deep = darkest*0.30, four ramp stops, ink = accent/s2
+// blend) so an in-place recolor matches what a fresh emit would dress. pn 2..5.
+static void DressColors(const unsigned int* pal, int pn,
+                        float deep[3], float s1[3], float s2[3],
+                        float accent[3], float ink[3])
+{
+    float rgb[5][3];
+    for (int i = 0; i < pn; i++)
+    {
+        rgb[i][0] = ((pal[i] >> 16) & 0xFF) / 255.0f;
+        rgb[i][1] = ((pal[i] >> 8)  & 0xFF) / 255.0f;
+        rgb[i][2] = ( pal[i]        & 0xFF) / 255.0f;
+    }
+    for (int i = 1; i < pn; i++)
+        for (int j = i; j > 0 && PalLum(rgb[j]) < PalLum(rgb[j - 1]); j--)
+            for (int c = 0; c < 3; c++)
+            { float x = rgb[j][c]; rgb[j][c] = rgb[j - 1][c]; rgb[j - 1][c] = x; }
+    const int i1 = ((pn - 1) + 1) / 3;
+    const int i2 = (2 * (pn - 1) + 1) / 3;
+    for (int c = 0; c < 3; c++)
+    {
+        deep[c]   = rgb[0][c] * 0.30f;
+        s1[c]     = rgb[i1][c];
+        s2[c]     = rgb[i2][c];
+        accent[c] = rgb[pn - 1][c];
+        ink[c]    = accent[c] * 0.75f + s2[c] * 0.25f;
+    }
+}
+
+// Replace the numeric float3(...) token beginning at f3pos in 'line' with
+// float3(r,g,b) at the dressing precision, keeping the trailing ')' and the
+// rest of the line intact. Returns true if a token was rewritten.
+static bool SubFloat3(std::string& line, size_t f3pos, const float* c, const char* sep)
+{
+    if (f3pos == std::string::npos) return false;
+    size_t open = line.find('(', f3pos);
+    if (open == std::string::npos) return false;
+    size_t close = line.find(')', open);
+    if (close == std::string::npos) return false;
+    char rep[80];
+    _snprintf(rep, sizeof(rep) - 1, "float3(%.4f%s%.4f%s%.4f",
+              c[0], sep, c[1], sep, c[2]);
+    rep[sizeof(rep) - 1] = 0;
+    line.replace(f3pos, close - f3pos, rep);     // ')' at 'close' is preserved
+    return true;
+}
+
+// Recolor an existing roll .milk into 'dst', swapping only palette-derived color
+// literals and leaving the tree, medium and decay untouched. Returns true on write.
+static bool RecolorRollFile(const wchar_t* src, const wchar_t* dst,
+                            const unsigned int* pal, int pn)
+{
+    FILE* f = _wfopen(src, L"rb");
+    if (!f) return false;
+    std::string data;
+    { char b[4096]; size_t r; while ((r = fread(b, 1, sizeof(b), f)) > 0) data.append(b, r); }
+    fclose(f);
+
+    float deep[3], s1[3], s2[3], accent[3], ink[3];
+    DressColors(pal, pn, deep, s1, s2, accent, ink);
+    const bool fourStop = data.find("- 2.0)") != std::string::npos;
+
+    std::string out;
+    out.reserve(data.size() + 64);
+    size_t i = 0;
+    while (i < data.size())
+    {
+        size_t nl  = data.find('\n', i);
+        size_t end = (nl == std::string::npos) ? data.size() : nl;
+        std::string line = data.substr(i, end - i);   // may keep a trailing '\r'
+
+        if (line.find("= prev*") != std::string::npos &&
+            line.find("* f *")   != std::string::npos)
+        {
+            // buf0 ink injection: the float3 just before "* f *".
+            SubFloat3(line, line.rfind("float3(", line.find("* f *")), ink, ", ");
+        }
+        else if (line.find("float3 ramp = lerp(") != std::string::npos)
+        {
+            // comp deep + first stop: two float3 on one line — edit the later
+            // one first so the earlier index stays valid.
+            size_t p1 = line.find("float3(");
+            size_t p2 = line.find("float3(", p1 + 1);
+            SubFloat3(line, p2, s1,   ",");
+            SubFloat3(line, p1, deep, ",");
+        }
+        else if (line.find("ramp = lerp(ramp,") != std::string::npos)
+        {
+            // -2.0 stop is the accent; -1.0 stop is s2 in a 4-stop ramp, but
+            // the accent in an LX1 3-stop ramp (no -2.0 line).
+            const float* col = (line.find("- 2.0)") != std::string::npos)
+                             ? accent
+                             : (fourStop ? s2 : accent);
+            SubFloat3(line, line.find("float3("), col, ",");
+        }
+        else if (line.find("ret = ramp + float3(") != std::string::npos)
+        {
+            SubFloat3(line, line.find("float3("), accent, ",");
+        }
+
+        out += line;
+        if (nl != std::string::npos) out += '\n';
+        i = end + 1;
+    }
+
+    FILE* g = _wfopen(dst, L"wb");
+    if (!g) return false;
+    fwrite(out.data(), 1, out.size(), g);
+    fclose(g);
+    return true;
 }
 
 static void CyclePalette(void)
@@ -534,31 +660,14 @@ static void CyclePalette(void)
 
     if (g_palCycle == 0) { g_plugin.LoadPreset(r->file, 0.0f); return; }  // back to own
 
-    const wchar_t* dash = wcsrchr(r->id, L'-');
-    if (!dash) return;
-    unsigned int seed = (unsigned int)wcstoul(dash + 1, NULL, 16);
-
-    wchar_t emitter[MAX_PATH];
-    if (!ResolveEmitter(emitter)) return;
+    unsigned int pal[5];
+    int pn = ParseLikedPal(g_likedPal[g_palCycle - 1], pal);
+    if (pn < 2) { g_palCycle = 0; g_plugin.LoadPreset(r->file, 0.0f); return; }
 
     wchar_t temp[MAX_PATH];
     swprintf(temp, L"%s_palcycle.milk", g_rollsDir);     // not latent_* -> never scanned
-
-    wchar_t cmd[1024];
-    swprintf(cmd, L"\"%s\" --seed %08X --outfile \"%s\" --palette-colors %S",
-             emitter, seed, temp, g_likedPal[g_palCycle - 1]);
-
-    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-    {
-        WaitForSingleObject(pi.hProcess, 5000);          // single-seed emit is fast
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        if (GetFileAttributesW(temp) != INVALID_FILE_ATTRIBUTES)
-            g_plugin.LoadPreset(temp, 0.0f);             // hard cut to the re-dress
-    }
+    if (RecolorRollFile(r->file, temp, pal, pn))
+        g_plugin.LoadPreset(temp, 0.0f);                 // instant, in-engine hard cut
 }
 
 extern "C" int LatentBrowserHandleChar(int ch)
@@ -709,6 +818,14 @@ static void LatText(const wchar_t* s, int x0, int y0, int x1, int y1, DWORD colo
                               color, false, 0xFF000000);
 }
 
+// Pixel width of a string in SIMPLE_FONT — GDI-exact via the engine, so the
+// panel hugs the lettering and follows the live UI text scale. (The D3DX
+// DT_CALCRECT path left the rect at its input width here, hence this route.)
+static int LatTextW(const wchar_t* s)
+{
+    return g_plugin.HostMeasureTextW(s, SIMPLE_FONT);
+}
+
 // The window is the porthole canvas (a fixed square, often 512px) — every
 // line here must fit ~60 chars at SIMPLE_FONT size or it clips at the edge
 // (DT_WORD_ELLIPSIS doesn't truncate through m_text). Plain '-' only: this
@@ -765,35 +882,47 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
     else
     {
         // Side panel over the live roll: the roll IS the content, so the list
-        // hugs the left edge and the rest of the screen stays preset. Gary's
-        // ask (2026-07-21) — the old 300px min was a slab over the 512 canvas
-        // (~58%). SIMPLE_FONT is ~fixed-pixel (not resolution-scaled), so size
-        // to a fixed width that just clears the widest line (~180px of compact
-        // rows / legend) rather than a %-of-width that overflows when narrow.
-        float panelW = 200.0f;
-        if (panelW > w - 20.0f) panelW = (float)((w > 40) ? (w - 20) : w);
-        LatRect(dev, w, h, 0, 0, panelW, (float)h, 0xD8000000);
-        LatRect(dev, w, h, panelW, 0, panelW + 2.0f, (float)h, 0xFF303030);
-
-        // Header lines must fit the ~300px panel (~40 chars): the overflow
-        // draws over the live roll, not ellipsized (see RenderLanding note).
+        // hugs the left edge and the rest of the screen stays preset. WIDTH IS
+        // DATA-DRIVEN (Gary, 2026-07-21): a fixed 200px clipped the vote-count
+        // line, so measure the header lines in SIMPLE_FONT and set the divider
+        // a few pixels past the widest lettering. SIMPLE_FONT is fixed-pixel, so
+        // this holds across resolutions without the old %-of-width overflow.
         int line    = h / 30;
         if (line < 15) line = 15;
         int headerH = line * 5 + line / 2;
         int rowH    = line + 2;
-        int x0 = 10, x1 = (int)panelW - 10;
+        const int x0 = 10;
+
+        wchar_t buf[160];
+        int nVote = 0, nLike = 0, nNo = 0;
+        for (int i = 0; i < g_count; i++)
+        {
+            int g = RollGroup(&g_rolls[i]);
+            if      (g == 0) nVote++;
+            else if (g == 1) nLike++;
+            else             nNo++;
+        }
+        swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no", nVote, nLike, nNo);
+
+        int maxw = LatTextW(buf);
+        {
+            int t;
+            if ((t = LatTextW(L"Y like  N pass  U clr"))      > maxw) maxw = t;
+            if ((t = LatTextW(L"1-6 tag  D descr"))           > maxw) maxw = t;
+            if ((t = LatTextW(L"p palette  X close"))         > maxw) maxw = t;
+            if ((t = LatTextW(L"LATENT 000/000  pal 00/00"))  > maxw) maxw = t;
+        }
+
+        float panelW = (float)(x0 + maxw + 10);          // ~10px right of the text
+        if (panelW < 150.0f)      panelW = 150.0f;
+        if (panelW > w - 20.0f)   panelW = (float)((w > 40) ? (w - 20) : w);
+        LatRect(dev, w, h, 0, 0, panelW, (float)h, 0xD8000000);
+        LatRect(dev, w, h, panelW, 0, panelW + 2.0f, (float)h, 0xFF303030);
+
+        int x1 = (int)panelW - 10;
 
         // header
         {
-            wchar_t buf[160];
-            int nVote = 0, nLike = 0, nNo = 0;
-            for (int i = 0; i < g_count; i++)
-            {
-                int g = RollGroup(&g_rolls[i]);
-                if      (g == 0) nVote++;
-                else if (g == 1) nLike++;
-                else             nNo++;
-            }
             // Title, and the live palette-cycle state when re-dressing this roll.
             if (g_palCycle > 0)
                 swprintf(buf, L"LATENT %d/%d  pal %d/%d",
