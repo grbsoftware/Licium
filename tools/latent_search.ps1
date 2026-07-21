@@ -13,7 +13,7 @@
 # Usage:
 #   .\latent_search.ps1 -Start 14000000                      # 1M seeds, emit 40
 #   .\latent_search.ps1 -Start 14000000 -Count 5000000 -Emit 60
-#   .\latent_search.ps1 -Start 14000000 -Swarm               # swarm mode (LXS1)
+#   .\latent_search.ps1 -Start 14000000 -Swarm               # swarm (LXS<genver>)
 #   .\latent_search.ps1 -Start 14000000 -Seek threads        # rank-side profile
 #   .\latent_search.ps1 -Start 14000000 -NoRefresh           # don't touch X
 #   .\latent_search.ps1 -Start 14000000 -NoHarvest           # skip Phase 0
@@ -33,7 +33,7 @@ param(
     [long]$Count = 1000000,
     [int]$Emit = 40,
     [int]$Threads = 10,
-    [switch]$Swarm,          # generation-side ACO state from Licium\ (LXS1)
+    [switch]$Swarm,          # generation-side ACO state from Licium\ (LXS<genver>)
     [string]$Seek = "",      # rank-side profile, e.g. "threads"
     [switch]$NoRefresh,      # leave the X browser alone at the end
     [switch]$NoHarvest       # skip Phase 0 (queue-leftover early haul)
@@ -106,8 +106,9 @@ if (Test-Path $RangesLog) {
 # Unemitted = "emitted":0 in the queue line AND no latent_<id>.milk on disk
 # (the queue is append-only, so a leftover harvested by a PREVIOUS run still
 # says emitted:0 — the file check is what keeps this idempotent). Cold current
-# lineage only: LXS1 needs its pheromone table to regrow and older genvers are
-# superseded; --seed regrows a cold id byte-identically from the seed alone.
+# lineage only: swarm (LXS<n>) needs its pheromone table to regrow and older
+# genvers are superseded; --seed regrows a cold id byte-identically from the
+# seed alone. (The banner regex below only matches cold LX<n>, never LXS<n>.)
 if (-not $NoHarvest) {
     $QueuePath = Join-Path $RollsDir "queue.jsonl"
     $lineage = $null

@@ -97,8 +97,9 @@ struct Tree
 // votes deposit NOTHING — the stub-pile law). The bias only deflects the kind
 // draw where pheromone exists: a flat context reduces to the EXACT cold
 // arithmetic (same single Next16 consumed), so a swarm scan over an empty
-// state equals the cold scan tree-for-tree. Lineage LXS1: regeneration =
-// seed + the run's archived table manifest; the .milk file is the artifact.
+// state equals the cold scan tree-for-tree. Lineage LXS<genver> (tracks the
+// current grammar): regeneration = seed + the run's archived table manifest;
+// the .milk file is the artifact.
 
 #define SWARM_ROOT 19                    // parent id for the root draw
 static float g_pher[20][2][19];          // [parent kind|ROOT][child slot][child kind]
@@ -210,9 +211,9 @@ static void DepositNode(const Tree* t, int i, int parent, int slot, float w)
 
 // Ground-truth reader for swarm mode: latent_votes.txt ("ID 1|0|-1") and
 // latent_verdicts.jsonl from the Licium state dir, later-wins per id, then
-// each rated LX1/LX2 id is COLD-decoded (call this before g_swarmOn goes on)
-// and its links deposited. LXS ids are skipped in v1 (their trees need their
-// own run manifests to regenerate — counted and reported, never guessed).
+// each rated CURRENT-lineage id is decoded (call this before g_swarmOn goes on)
+// and its links deposited. Other lineages (older cold LX<n>, swarm LXS<n>) are
+// skipped — their trees don't match the current grammar — counted and reported.
 struct SwarmRated { char id[24]; float voteW, verdW; };
 static int SwarmFindOrAdd(SwarmRated* arr, int* n, int cap, const char* id)
 {
@@ -273,31 +274,50 @@ static void LoadSwarmState(const char* stateDir, int* outDeposited, int* outFore
         fclose(f);
     }
 
+    // A rated id only regenerates its ACTUAL tree under the grammar it was grown
+    // with. BuildFromSeed here is the CURRENT (LX<genver>) grammar, so only
+    // current-lineage ids ("LX<genver>-") deposit correctly; older cold
+    // lineages and swarm ids are foreign (their trees differ under this grammar)
+    // and are skipped, counted, and reported. This is what makes swarm learn
+    // from — and grow within — the version we are actually searching.
+    char curpfx[8];
+    _snprintf(curpfx, sizeof(curpfx) - 1, "LX%d-", LX_GENVER);
+    curpfx[sizeof(curpfx) - 1] = 0;
+    const size_t curpl = strlen(curpfx);
+
     *outDeposited = 0;
     *outForeign = 0;
     for (int i = 0; i < nr; i++)
     {
         float w = rated[i].voteW + rated[i].verdW;
         if (w == 0.0f) continue;
-        // only pure-seed lineages decode cold; LXS/foreign ids are skipped
-        unsigned int seed;
-        if (!strncmp(rated[i].id, "LX1-", 4) || !strncmp(rated[i].id, "LX2-", 4))
-            seed = (unsigned int)strtoul(rated[i].id + 4, NULL, 16);
-        else { (*outForeign)++; continue; }
+        if (strncmp(rated[i].id, curpfx, curpl) != 0) { (*outForeign)++; continue; }
+        unsigned int seed = (unsigned int)strtoul(rated[i].id + curpl, NULL, 16);
         Tree t;
         float decay;
         if (!BuildFromSeed(seed, &t, &decay)) continue;
         DepositNode(&t, t.root,  SWARM_ROOT, 0, w);
-        DepositNode(&t, t.root2, SWARM_ROOT, 0, w);   // LX4: psi links count too
+        DepositNode(&t, t.root2, SWARM_ROOT, 0, w);   // ink + psi links both count
         (*outDeposited)++;
     }
 }
 
-// Lineage tag for filenames / queue ids: cold = LX<genver>, swarm = LXS1.
+// Lineage tag for filenames / queue ids. BOTH track the current grammar
+// version: cold = LX<genver>, swarm = LXS<genver>. Swarm biases the SAME
+// grammar cold uses (BiasedPick only deflects the kind draw), so a swarm roll
+// is a current-genver tree — it must carry the current version, not a frozen
+// "LXS1", or rolls grown under different grammars collide under one tag and no
+// longer regenerate. (Gary, 2026-07-21: "swarm should work for any version we
+// are currently on.")
 static const char* LineageStr(void)
 {
-    static char cold[8] = { 0 };
-    if (g_swarmOn) return "LXS1";
+    static char cold[8]  = { 0 };
+    static char swarm[8] = { 0 };
+    if (g_swarmOn)
+    {
+        if (!swarm[0]) _snprintf(swarm, sizeof(swarm) - 1, "LXS%d", LX_GENVER);
+        return swarm;
+    }
     if (!cold[0]) _snprintf(cold, sizeof(cold) - 1, "LX%d", LX_GENVER);
     return cold;
 }
@@ -1099,7 +1119,7 @@ int main(int argc, char** argv)
         printf("latent_prospect (LX%d) — Latent Phase A. docs\\LATENT_DESIGN.md\n", LX_GENVER);
         printf("  --scan:     --start N --count N --outdir DIR [--emit K (default %d)] [--threads N (default cores-2)]\n", LX_EMIT_CAP);
         printf("  --swarm STATEDIR [--lambda F (default 0.35)]   ACO mode: pheromone from\n");
-        printf("              votes+verdicts in STATEDIR biases growth; lineage LXS1;\n");
+        printf("              current-lineage votes+verdicts biases growth; lineage LXS%d;\n", LX_GENVER);
         printf("              table manifest archived next to the queue\n");
         printf("  --seek threads            rank-side profile: surface filament/thread\n");
         printf("              visuals (ridge-rich, blob-poor fields); combinable with --swarm\n");
@@ -1113,10 +1133,10 @@ int main(int argc, char** argv)
     {
         memset(g_pher, 0, sizeof(g_pher));
         int nDep = 0, nForeign = 0;
-        LoadSwarmState(swarmDir, &nDep, &nForeign);   // cold decode BEFORE bias turns on
+        LoadSwarmState(swarmDir, &nDep, &nForeign);   // decode BEFORE bias turns on
         g_swarmOn = 1;
-        printf("swarm: %d rated ids deposited (%d foreign-lineage skipped), lambda=%.2f -> lineage LXS1\n",
-               nDep, nForeign, g_lambda);
+        printf("swarm: %d rated ids deposited (%d foreign-lineage skipped), lambda=%.2f -> lineage %s\n",
+               nDep, nForeign, g_lambda, LineageStr());
         if (!nDep)
             printf("swarm: table is flat (no usable ratings) - this scan will equal a cold scan\n");
     }
@@ -1227,7 +1247,7 @@ int main(int argc, char** argv)
     }
     if (q) fclose(q);
 
-    // Swarm runs archive their pheromone table: an LXS1 id regenerates only as
+    // Swarm runs archive their pheromone table: a swarm id regenerates only as
     // seed + this table (the .milk files stay the permanent artifact anyway).
     if (g_swarmOn)
     {
@@ -1237,7 +1257,7 @@ int main(int argc, char** argv)
         FILE* m = fopen(mpath, "wb");
         if (m)
         {
-            fprintf(m, "lineage LXS1  lambda %.4f  range [%u..%u)\n", g_lambda, start, start + count);
+            fprintf(m, "lineage %s  lambda %.4f  range [%u..%u)\n", LineageStr(), g_lambda, start, start + count);
             fprintf(m, "# parent slot child weight (only nonzero entries)\n");
             for (int p = 0; p < 20; p++)
                 for (int s = 0; s < 2; s++)
