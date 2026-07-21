@@ -595,7 +595,10 @@ float CPluginShell::HostGetTextScale()
 {
 	if (s_uiTextScale <= 0.0f)
 	{
-		int pct = GetPrivateProfileIntW(L"settings", L"nUiTextScalePct", 125, m_szConfigIniFile);
+		// Default 175%: on this engine's small base fonts a 25% bump is lost to
+		// TrueType small-size hint quantization (100-150% look identical); ~175%
+		// is the first clearly-larger, legible step. The slider spans 75-300%.
+		int pct = GetPrivateProfileIntW(L"settings", L"nUiTextScalePct", 175, m_szConfigIniFile);
 		if (pct < 75)  pct = 75;
 		if (pct > 300) pct = 300;
 		s_uiTextScale = pct / 100.0f;

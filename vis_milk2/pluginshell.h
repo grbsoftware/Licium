@@ -106,8 +106,10 @@ public:
     // panels size themselves to the lettering instead of guessing.
     int          HostMeasureTextW(const wchar_t* s, eFontIndex idx);
     // Global UI text scale for all on-canvas overlay fonts (Latent, Bandit,
-    // Palettes, help/landing). 1.0 = the shipped sizes; default 1.25 so text is
-    // legible on small laptop panels. Persisted to licium.ini (nUiTextScalePct).
+    // Palettes, help/landing). 1.0 = the shipped sizes; default 1.75 so text is
+    // legible on small laptop panels (small-size hint quantization makes a 25%
+    // bump invisible; ~175% is the first clearly-larger step). Persisted to
+    // licium.ini (nUiTextScalePct).
     float        HostGetTextScale();
     int          HostGetTextScalePct();
     void         HostSetTextScalePct(int pct);   // clamp, persist, recreate fonts live

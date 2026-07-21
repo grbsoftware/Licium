@@ -20,7 +20,7 @@ extern CPlugin g_plugin;
 
 #define UI_SCALE_MIN 75
 #define UI_SCALE_MAX 300
-#define UI_SCALE_DEF 125
+#define UI_SCALE_DEF 175
 
 static int s_scaleAtOpen = UI_SCALE_DEF;   // for Cancel-reverts
 
