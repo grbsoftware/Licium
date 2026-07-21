@@ -141,105 +141,152 @@ static DWORD WINAPI CaptureThread(LPVOID)
     bool comInited = SUCCEEDED(hr);
 
     IMMDeviceEnumerator *pEnum = NULL;
-    IMMDevice           *pDev  = NULL;
-    IAudioClient        *pClient = NULL;
-    IAudioCaptureClient *pCap  = NULL;
-    WAVEFORMATEX        *wfx   = NULL;
-    bool started = false;
 
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
                           __uuidof(IMMDeviceEnumerator), (void **)&pEnum);
     if (FAILED(hr)) { AudioLog("CoCreateInstance(MMDeviceEnumerator) failed"); goto done; }
 
-    // Pick the endpoint: "Auto" = default render (loopback); otherwise the
-    // explicitly selected device (a specific speaker = still loopback, a mic =
-    // direct capture).
-    if (g_useDefault)
-    {
-        hr = pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDev);
-        if (FAILED(hr)) { AudioLog("GetDefaultAudioEndpoint(eRender) failed"); goto done; }
-    }
-    else
-    {
-        hr = pEnum->GetDevice(g_targetId, &pDev);
-        if (FAILED(hr)) { AudioLog("GetDevice(selected) failed"); goto done; }
-    }
-
-    hr = pDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void **)&pClient);
-    if (FAILED(hr)) { AudioLog("Activate(IAudioClient) failed"); goto done; }
-
-    hr = pClient->GetMixFormat(&wfx);
-    if (FAILED(hr) || !wfx) { AudioLog("GetMixFormat failed"); goto done; }
-
-    // Shared mode. Loopback flag for render endpoints (taps what plays); no flag
-    // for a real mic (direct capture). 200ms buffer, poll-driven (loopback event
-    // mode is finicky; polling a shared buffer is robust and cheap).
-    {
-        DWORD streamFlags = g_captureMode ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
-        hr = pClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags,
-                                 2000000 /*200ms in 100ns units*/, 0, wfx, NULL);
-    }
-    if (FAILED(hr)) { AudioLog("IAudioClient::Initialize failed"); goto done; }
-
-    hr = pClient->GetService(__uuidof(IAudioCaptureClient), (void **)&pCap);
-    if (FAILED(hr)) { AudioLog("GetService(IAudioCaptureClient) failed"); goto done; }
-
-    hr = pClient->Start();
-    if (FAILED(hr)) { AudioLog("IAudioClient::Start failed"); goto done; }
-    started = true;
-    {
-        char m[128];
-        _snprintf_s(m, sizeof(m), _TRUNCATE,
-            "WASAPI loopback started: %uHz %uch %ubit",
-            wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
-        AudioLog(m);
-    }
-
-    DWORD lastLog = GetTickCount();
+    // Outer loop: (re)open the endpoint and capture until it goes away, or -- for
+    // "Auto" -- until the DEFAULT OUTPUT changes (e.g. speakers -> headphones).
+    // The old code opened once and looped forever on that first endpoint, so
+    // switching outputs left the visuals reacting to a now-silent device (and an
+    // unplug just killed the thread). Now a change breaks the inner loop and we
+    // reopen on whatever is current.
     while (g_run)
     {
-        // Once a second, report the peak level so the log shows real audio is
-        // being captured (peak > 0 => music is flowing; ~0 => silent endpoint).
-        DWORD now = GetTickCount();
-        if (now - lastLog >= 1000)
+        IMMDevice           *pDev    = NULL;
+        IAudioClient        *pClient = NULL;
+        IAudioCaptureClient *pCap    = NULL;
+        WAVEFORMATEX        *wfx     = NULL;
+        bool     started  = false;
+        wchar_t  openedId[512] = { 0 };   // id of the endpoint we opened (Auto-follow)
+        DWORD    lastLog = 0, lastDevChk = 0;
+
+        // Pick the endpoint: "Auto" = default render (loopback); otherwise the
+        // explicitly selected device (a specific speaker = still loopback, a mic
+        // = direct capture).
+        if (g_useDefault)
+            hr = pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDev);
+        else
+            hr = pEnum->GetDevice(g_targetId, &pDev);
+        if (FAILED(hr) || !pDev) { AudioLog("open endpoint failed - retrying"); goto reopen; }
+
+        // Remember its id so an "Auto" capture can notice a later default switch.
         {
-            EnterCriticalSection(&g_lock);
-            float peak = g_peak; g_peak = 0.0f;
-            LeaveCriticalSection(&g_lock);
-            char m[64];
-            _snprintf_s(m, sizeof(m), _TRUNCATE, "level peak=%.3f", peak);
+            LPWSTR idStr = NULL;
+            if (SUCCEEDED(pDev->GetId(&idStr)) && idStr)
+            {
+                wcsncpy_s(openedId, 512, idStr, _TRUNCATE);
+                CoTaskMemFree(idStr);
+            }
+        }
+
+        hr = pDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void **)&pClient);
+        if (FAILED(hr)) { AudioLog("Activate(IAudioClient) failed"); goto reopen; }
+
+        hr = pClient->GetMixFormat(&wfx);
+        if (FAILED(hr) || !wfx) { AudioLog("GetMixFormat failed"); goto reopen; }
+
+        // Shared mode. Loopback flag for render endpoints (taps what plays); no
+        // flag for a real mic (direct capture). 200ms buffer, poll-driven
+        // (loopback event mode is finicky; polling a shared buffer is robust).
+        {
+            DWORD streamFlags = g_captureMode ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
+            hr = pClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags,
+                                     2000000 /*200ms in 100ns units*/, 0, wfx, NULL);
+        }
+        if (FAILED(hr)) { AudioLog("IAudioClient::Initialize failed"); goto reopen; }
+
+        hr = pClient->GetService(__uuidof(IAudioCaptureClient), (void **)&pCap);
+        if (FAILED(hr)) { AudioLog("GetService(IAudioCaptureClient) failed"); goto reopen; }
+
+        hr = pClient->Start();
+        if (FAILED(hr)) { AudioLog("IAudioClient::Start failed"); goto reopen; }
+        started = true;
+        {
+            char m[128];
+            _snprintf_s(m, sizeof(m), _TRUNCATE,
+                "WASAPI loopback started: %uHz %uch %ubit",
+                wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
             AudioLog(m);
-            lastLog = now;
         }
 
-        UINT32 packet = 0;
-        hr = pCap->GetNextPacketSize(&packet);
-        if (FAILED(hr)) break;
-
-        if (packet == 0) { Sleep(5); continue; }
-
-        while (packet != 0 && g_run)
+        lastLog = lastDevChk = GetTickCount();
+        while (g_run)
         {
-            BYTE  *data = NULL;
-            UINT32 frames = 0;
-            DWORD  flags = 0;
-            hr = pCap->GetBuffer(&data, &frames, &flags, NULL, NULL);
-            if (FAILED(hr)) { packet = 0; break; }
+            // Once a second, report the peak level so the log shows real audio is
+            // being captured (peak > 0 => music is flowing; ~0 => silent endpoint).
+            DWORD now = GetTickCount();
+            if (now - lastLog >= 1000)
+            {
+                EnterCriticalSection(&g_lock);
+                float peak = g_peak; g_peak = 0.0f;
+                LeaveCriticalSection(&g_lock);
+                char m[64];
+                _snprintf_s(m, sizeof(m), _TRUNCATE, "level peak=%.3f", peak);
+                AudioLog(m);
+                lastLog = now;
+            }
 
-            DecodePacket(data, frames, flags, wfx);
-            pCap->ReleaseBuffer(frames);
+            // Auto: follow the default output. If the default render endpoint is
+            // now a different device than the one we opened, break out and reopen
+            // on it -- this is what makes a speakers->headphones switch take.
+            if (g_useDefault && now - lastDevChk >= 1000)
+            {
+                lastDevChk = now;
+                IMMDevice *pCur = NULL;
+                if (SUCCEEDED(pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pCur)) && pCur)
+                {
+                    LPWSTR curId = NULL;
+                    if (SUCCEEDED(pCur->GetId(&curId)) && curId)
+                    {
+                        bool changed = (openedId[0] && wcscmp(curId, openedId) != 0);
+                        CoTaskMemFree(curId);
+                        if (changed)
+                        {
+                            AudioLog("default output changed - reopening loopback on it");
+                            pCur->Release();
+                            break;
+                        }
+                    }
+                    pCur->Release();
+                }
+            }
 
+            UINT32 packet = 0;
             hr = pCap->GetNextPacketSize(&packet);
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) break;   // device invalidated (unplug/switch) -> reopen
+
+            if (packet == 0) { Sleep(5); continue; }
+
+            while (packet != 0 && g_run)
+            {
+                BYTE  *data = NULL;
+                UINT32 frames = 0;
+                DWORD  flags = 0;
+                hr = pCap->GetBuffer(&data, &frames, &flags, NULL, NULL);
+                if (FAILED(hr)) { packet = 0; break; }
+
+                DecodePacket(data, frames, flags, wfx);
+                pCap->ReleaseBuffer(frames);
+
+                hr = pCap->GetNextPacketSize(&packet);
+                if (FAILED(hr)) break;
+            }
         }
+
+    reopen:
+        if (started && pClient) pClient->Stop();
+        if (wfx)     CoTaskMemFree(wfx);
+        if (pCap)    pCap->Release();
+        if (pClient) pClient->Release();
+        if (pDev)    pDev->Release();
+        // Pause before reopening so a mid-transition device (unplug/replug, or a
+        // default switch still settling) doesn't spin the loop.
+        if (g_run) Sleep(400);
     }
 
 done:
-    if (started && pClient) pClient->Stop();
-    if (wfx)    CoTaskMemFree(wfx);
-    if (pCap)   pCap->Release();
-    if (pClient) pClient->Release();
-    if (pDev)   pDev->Release();
     if (pEnum)  pEnum->Release();
     if (comInited) CoUninitialize();
     return 0;
