@@ -967,7 +967,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             else if (g == 1) nLike++;
             else             nNo++;
         }
-        swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no", nVote, nLike, nNo);
+        swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
 
         int maxw = LatTextW(buf);
         {
@@ -975,7 +975,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             if ((t = LatTextW(L"Y like  N pass  U clr"))      > maxw) maxw = t;
             if ((t = LatTextW(L"1-6 tag  D descr"))           > maxw) maxw = t;
             if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
-            if ((t = LatTextW(L"LATENT 000/000  pal 00/00"))  > maxw) maxw = t;
+            if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > maxw) maxw = t;
         }
 
         float panelW = (float)(x0 + maxw + 10);          // ~10px right of the text
@@ -988,18 +988,20 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
 
         // header
         {
-            // Title, and the live palette-cycle state when re-dressing this roll.
+            // The prominent count is the UNTOUCHED pile, not g_count (Gary,
+            // 2026-07-21): total rolls only mattered for the shelved ML-guided
+            // sampling; for cold "what's left to look at" browsing the meaningful
+            // number is how many rolls are still to vote on. Position is dropped
+            // (the cursor highlight already shows where you are). palCycle state
+            // still rides the title line when re-dressing this roll.
             if (g_palCycle > 0)
-                swprintf(buf, L"LATENT %d/%d  pal %d/%d",
-                         g_sel + 1, g_count, g_palCycle, g_likedCount);
-            else if (g_hideVoted)
-                swprintf(buf, L"LATENT   %d/%d  unvoted", g_count ? g_sel + 1 : 0, g_count);
+                swprintf(buf, L"LATENT   \x00b7 %d to vote   pal %d/%d",
+                         nVote, g_palCycle, g_likedCount);
             else
-                swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
+                swprintf(buf, L"LATENT   \x00b7 %d to vote", nVote);
             LatText(buf, x0, line / 2, x1, line / 2 + line,
                     (g_palCycle > 0) ? 0xFF70C0FF : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
-            swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no",
-                     nVote, nLike, nNo);
+            swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
             LatText(L"Y like  N pass  U clr",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
