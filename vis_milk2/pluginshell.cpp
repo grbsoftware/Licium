@@ -583,8 +583,73 @@ void CPluginShell::CleanUpVJStuff()
 	}
 }
 
+#ifdef MILKDROP_STANDALONE
+// The configured base font sizes, captured once before any UI scaling is
+// applied, plus the live scale. Rescaling always derives nSize from the base so
+// it never compounds across device resets / repeated rescales.
+static int   s_fontBase[NUM_BASIC_FONTS + NUM_EXTRA_FONTS];
+static bool  s_fontBaseCaptured = false;
+static float s_uiTextScale = 0.0f;    // 0 = not yet loaded from ini
+
+float CPluginShell::HostGetTextScale()
+{
+	if (s_uiTextScale <= 0.0f)
+	{
+		int pct = GetPrivateProfileIntW(L"settings", L"nUiTextScalePct", 125, m_szConfigIniFile);
+		if (pct < 75)  pct = 75;
+		if (pct > 300) pct = 300;
+		s_uiTextScale = pct / 100.0f;
+	}
+	return s_uiTextScale;
+}
+
+int CPluginShell::HostGetTextScalePct()
+{
+	return (int)(HostGetTextScale() * 100.0f + 0.5f);
+}
+
+void CPluginShell::HostSetTextScalePct(int pct)
+{
+	if (pct < 75)  pct = 75;
+	if (pct > 300) pct = 300;
+	s_uiTextScale = pct / 100.0f;
+
+	wchar_t v[16];
+	swprintf(v, L"%d", pct);
+	WritePrivateProfileStringW(L"settings", L"nUiTextScalePct", v, m_szConfigIniFile);
+
+	// Rebuild the D3DX overlay fonts at the new size, in place — no device
+	// reset needed. Runs on the window thread (menu / dialog / WM_APP), between
+	// frames, so it is safe to release and recreate the font objects here.
+	if (m_lpDX && m_lpDX->m_lpDevice)
+	{
+		CleanUpFonts();
+		AllocateFonts(m_lpDX->m_lpDevice);
+	}
+}
+#endif
+
 int CPluginShell::AllocateFonts(IDirect3DDevice9* pDevice)
 {
+#ifdef MILKDROP_STANDALONE
+	// Capture the shipped sizes once, then request base * UI-scale. The "M"
+	// height measure below overwrites nSize with the actual rendered height,
+	// which is why the base must be remembered separately.
+	if (!s_fontBaseCaptured)
+	{
+		for (int i=0; i<NUM_BASIC_FONTS + NUM_EXTRA_FONTS; i++)
+			s_fontBase[i] = m_fontinfo[i].nSize;
+		s_fontBaseCaptured = true;
+	}
+	{
+		float scale = HostGetTextScale();
+		for (int i=0; i<NUM_BASIC_FONTS + NUM_EXTRA_FONTS; i++)
+		{
+			int sz = (int)(s_fontBase[i] * scale + 0.5f);
+			m_fontinfo[i].nSize = (sz < 6) ? 6 : sz;
+		}
+	}
+#endif
 	// Create D3DX system font:
 	for (int i=0; i<NUM_BASIC_FONTS + NUM_EXTRA_FONTS; i++)
 		if (pCreateFontW(pDevice,  //m_font[i],

@@ -502,6 +502,7 @@ Order of Function Calls
 #include "licium_bandit.h" // standalone-only; no-op in the Winamp DLL build
 #include "licium_palettes.h" // standalone-only; no-op in the Winamp DLL build
 #include "licium_latent.h" // standalone-only; no-op in the Winamp DLL build
+#include "licium_settings.h" // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
 #include <process.h>  // for beginthread, etc.
@@ -5465,6 +5466,11 @@ LRESULT CPlugin::MyWindowProc(HWND hWnd, unsigned uMsg, WPARAM wParam, LPARAM lP
         // Automation: open (wParam=1) / close (0) the latent browser; drive
         // navigation and votes with posted keydowns/chars (physical-key mimicry).
         if (wParam) LatentBrowserOpen(); else LatentBrowserClose();
+        return 0;
+    case WM_LICIUM_TEXTSCALE:
+        // Apply a UI text scale (wParam = percent). Also how the Settings dialog
+        // pushes changes onto the render thread, and the headless verify hook.
+        HostSetTextScalePct((int)wParam);
         return 0;
     case WM_COPYDATA:
         // Automation: hard-cut-load an exact preset file (Latent Phase B

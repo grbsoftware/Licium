@@ -834,7 +834,9 @@ static void RenderLanding(IDirect3DDevice9* dev, int w, int h)
 {
     LatRect(dev, w, h, 0, 0, (float)w, (float)h, 0xE6000000);
 
+    int fh = g_plugin.GetFontHeight(SIMPLE_FONT);
     int line = h / 24;
+    if (line < fh + fh / 4) line = fh + fh / 4;   // grow with the UI text scale
     int x0 = w / 16, x1 = w - w / 16;
     int y = h / 9;
 
@@ -887,7 +889,11 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         // line, so measure the header lines in SIMPLE_FONT and set the divider
         // a few pixels past the widest lettering. SIMPLE_FONT is fixed-pixel, so
         // this holds across resolutions without the old %-of-width overflow.
+        // Row pitch follows the (scalable) font height so rows never overlap
+        // when the UI text scale is raised; still at least the old h/30 rhythm.
+        int fh      = g_plugin.GetFontHeight(SIMPLE_FONT);
         int line    = h / 30;
+        if (line < fh + fh / 4) line = fh + fh / 4;
         if (line < 15) line = 15;
         int headerH = line * 5 + line / 2;
         int rowH    = line + 2;
