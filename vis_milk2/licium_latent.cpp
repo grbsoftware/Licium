@@ -265,20 +265,71 @@ static void LoadNotes(const wchar_t* fetchId, wchar_t* fetchOut /*LATENT_NOTE_LE
     fclose(f);
 }
 
+// Section a roll falls into (Gary, 2026-07-21 "put all the no's somewhere"):
+//   0 TO VOTE (unvoted)  1 LIKED  2 PASSED (the no's shelf, out of the way)
+// Likes sit ABOVE the passed shelf so they stay reachable (revisiting a like
+// to try other palettes is a first-class flow now — see palette cycling).
+static int RollGroup(const LatentRoll* r)
+{
+    return (r->vote == 0) ? 2 : (r->vote == 1) ? 1 : 0;
+}
+static const wchar_t* SECTION_LABEL[3] =
+    { L"- to vote -", L"- liked -", L"- passed (no's) -" };
+
 static int __cdecl RollCompare(const void* a, const void* b)
 {
     const LatentRoll* ra = (const LatentRoll*)a;
     const LatentRoll* rb = (const LatentRoll*)b;
-    // Voted rolls sink below unvoted ones, likes at the very bottom (Gary,
-    // 2026-07-18: otherwise reaching the votable rolls means skipping over
-    // hundreds of already-rated ones). Sort is applied at open only, so a
-    // vote never moves a roll out from under the cursor mid-session.
-    int ga = (ra->vote == 1) ? 2 : (ra->vote == 0) ? 1 : 0;
-    int gb = (rb->vote == 1) ? 2 : (rb->vote == 0) ? 1 : 0;
+    // Group first (unvoted -> liked -> passed shelf), then machine verdict,
+    // then id. Sort is applied at open only, so a mid-session vote never moves
+    // a roll out from under the cursor.
+    int ga = RollGroup(ra), gb = RollGroup(rb);
     if (ga != gb) return ga - gb;
     int d = VerdictRank(ra->verdict) - VerdictRank(rb->verdict);
     if (d) return d;
     return wcscmp(ra->id, rb->id);
+}
+
+// ---- sectioned display list -------------------------------------------------
+// The browse list interleaves section-header rows between groups so the shelf
+// structure is visible. g_sel/navigation stay in ROLL space (voting/loading
+// unchanged); this list is a render/scroll model only, rebuilt at open.
+struct DispEntry { int isHeader; int group; int rollIdx; };
+static DispEntry* g_disp       = NULL;
+static int*       g_rollToDisp = NULL;   // roll index -> its display row
+static int        g_dispCount  = 0;
+static int        g_dispCap    = 0;
+
+static void BuildDisplayList(void)
+{
+    g_dispCount = 0;
+    if (g_count <= 0) return;
+    int need = g_count + 4;               // up to 3 headers + slack
+    if (need > g_dispCap)
+    {
+        DispEntry* nd = (DispEntry*)realloc(g_disp, need * sizeof(DispEntry));
+        int*       nr = (int*)realloc(g_rollToDisp, g_count * sizeof(int));
+        if (!nd || !nr) { free(nd ? nd : g_disp); g_disp = NULL; return; }
+        g_disp = nd; g_rollToDisp = nr; g_dispCap = need;
+    }
+    int prevGroup = -1;
+    for (int i = 0; i < g_count; i++)
+    {
+        int g = RollGroup(&g_rolls[i]);
+        if (g != prevGroup)
+        {
+            g_disp[g_dispCount].isHeader = 1;
+            g_disp[g_dispCount].group    = g;
+            g_disp[g_dispCount].rollIdx  = -1;
+            g_dispCount++;
+            prevGroup = g;
+        }
+        g_rollToDisp[i] = g_dispCount;
+        g_disp[g_dispCount].isHeader = 0;
+        g_disp[g_dispCount].group    = g;
+        g_disp[g_dispCount].rollIdx  = i;
+        g_dispCount++;
+    }
 }
 
 // ---- appending state ---------------------------------------------------------
@@ -337,6 +388,7 @@ extern "C" void LatentBrowserOpen(void)
     LoadNotes(NULL, NULL);
     if (g_count > 1)
         qsort(g_rolls, g_count, sizeof(LatentRoll), RollCompare);
+    BuildDisplayList();
     g_sel = 0;
     g_scroll = 0;
 
@@ -619,18 +671,18 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         // header
         {
             wchar_t buf[160];
-            int nAlive = 0, nNew = 0, nShelf = 0;
+            int nVote = 0, nLike = 0, nNo = 0;
             for (int i = 0; i < g_count; i++)
             {
-                int rk = VerdictRank(g_rolls[i].verdict);
-                if      (rk == 0) nAlive++;
-                else if (rk == 1) nNew++;
-                else              nShelf++;
+                int g = RollGroup(&g_rolls[i]);
+                if      (g == 0) nVote++;
+                else if (g == 1) nLike++;
+                else             nNo++;
             }
             swprintf(buf, L"LATENT   %d/%d", g_count ? g_sel + 1 : 0, g_count);
             LatText(buf, x0, line / 2, x1, line / 2 + line, 0xFFFFFFFF);
-            swprintf(buf, L"%d lv \x00b7 %d nw \x00b7 %d sh",
-                     nAlive, nNew, nShelf);
+            swprintf(buf, L"%d vote \x00b7 %d liked \x00b7 %d no",
+                     nVote, nLike, nNo);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
             LatText(L"Y like  N pass  U clr",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
@@ -645,17 +697,35 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         }
         else
         {
+            // The list scrolls in DISPLAY-row space (rolls + section headers);
+            // g_scroll is a display-row offset. Keep the SELECTED roll visible
+            // by mapping it through g_rollToDisp.
             int visible = (h - headerH - 4) / rowH;
             if (visible < 1) visible = 1;
-            if (g_sel < g_scroll)               g_scroll = g_sel;
-            if (g_sel >= g_scroll + visible)    g_scroll = g_sel - visible + 1;
+            int selDisp = (g_rollToDisp && g_sel < g_count) ? g_rollToDisp[g_sel] : 0;
+            if (selDisp < g_scroll)            g_scroll = selDisp;
+            if (selDisp >= g_scroll + visible) g_scroll = selDisp - visible + 1;
+            if (g_scroll < 0) g_scroll = 0;
 
-            for (int row = 0; row < visible && g_scroll + row < g_count; row++)
+            for (int row = 0; row < visible && g_scroll + row < g_dispCount; row++)
             {
-                LatentRoll* r = &g_rolls[g_scroll + row];
-                int   idx = g_scroll + row;
+                DispEntry* e = &g_disp[g_scroll + row];
                 float ry0 = (float)(headerH + row * rowH);
                 float ry1 = ry0 + rowH - 1;
+
+                if (e->isHeader)
+                {
+                    // Section divider: a thin rule + the shelf label, dim.
+                    LatRect(dev, w, h, 6.0f, ry1 - 1.0f, panelW - 6.0f, ry1, 0xFF3A3A46);
+                    DWORD hcol = (e->group == 1) ? 0xFF70A070    // liked = green-ish
+                               : (e->group == 2) ? 0xFF906060    // passed = dim red
+                               :                   0xFF8888AA;   // to vote
+                    LatText(SECTION_LABEL[e->group], x0, (int)ry0, x1, (int)ry1, hcol);
+                    continue;
+                }
+
+                LatentRoll* r = &g_rolls[e->rollIdx];
+                int idx = e->rollIdx;
 
                 if (idx == g_sel)
                     LatRect(dev, w, h, 4.0f, ry0, panelW - 4.0f, ry1, 0xFF2A2A34);
