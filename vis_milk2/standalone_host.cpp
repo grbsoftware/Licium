@@ -34,6 +34,7 @@
 #include "licium_bandit.h"
 #include "licium_palettes.h"
 #include "licium_latent.h"
+#include "licium_settings.h"
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -479,6 +480,7 @@ static void HostSplashTick(void)
 #define HM_LATENT_NOTES   0xE1A2
 #define HM_LATENT_SEARCH  0xE1A3   // Run search... dialog (latent_search.ps1)
 #define HM_HELP_INTRO     0xE132   // Show intro pages again (Help)
+#define HM_EDIT_SETTINGS  0xE1B0   // Edit > Settings... (licium_settings.cpp)
 
 // Command id of the currently-selected audio source (for the menu radio check).
 // Starts on Auto = default output, loopback (matches wasapi_audio's default).
@@ -500,6 +502,12 @@ extern "C" HMENU HostBuildMenuBar(void)
     AppendMenuW(file, MF_SEPARATOR, 0, NULL);
     AppendMenuW(file, MF_STRING,            HM_FILE_EXIT,   L"E&xit");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
+
+    // Edit: app preferences. Settings... opens the text-size (and future)
+    // options; text scale is global across every on-canvas overlay.
+    HMENU edit = CreatePopupMenu();
+    AppendMenuW(edit, MF_STRING, HM_EDIT_SETTINGS, L"&Settings...");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)edit, L"&Edit");
 
     // (3.33 had Effects and Sprites here; we are not porting those features, so
     // they are omitted rather than shown as dead placeholders. New categories can
@@ -772,6 +780,9 @@ extern "C" int HostHandleMenuCommand(HWND hwnd, int cmd_id)
         return 1;
     case HM_FILE_EXIT:
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 1;
+    case HM_EDIT_SETTINGS:
+        LiciumSettingsOpen(hwnd);
         return 1;
     case HM_PLAYLIST_LOAD:
         HostLoadPlaylistDialog(hwnd);

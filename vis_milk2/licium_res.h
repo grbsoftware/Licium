@@ -27,4 +27,12 @@
 #define IDC_LS_REFRESH    1307
 #define IDC_LS_NOHARVEST  1308
 
+// Edit > Settings... dialog (licium_settings.cpp). First row is the global UI
+// text scale; built to grow more settings later.
+#define IDD_LICIUM_SETTINGS 131
+#define IDC_SET_SCALE     1310   // trackbar, 75..300 (percent)
+#define IDC_SET_SCALEVAL  1311   // "NNN%" readout
+#define IDC_SET_WARN      1312   // occlusion warning text
+#define IDC_SET_RESET     1313   // reset to default
+
 #endif // LICIUM_RES_H
