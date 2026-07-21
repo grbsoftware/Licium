@@ -26,6 +26,11 @@
 #define IDC_LS_SEEK       1306
 #define IDC_LS_REFRESH    1307
 #define IDC_LS_NOHARVEST  1308
+// grading schedule (Phase B): when to run the off-screen triage after the scan
+#define IDC_LS_GRADE_NOW  1320   // radio: grade immediately
+#define IDC_LS_GRADE_IDLE 1321   // radio: grade once the machine is idle
+#define IDC_LS_GRADE_AT   1322   // radio: grade at a set clock time
+#define IDC_LS_GRADE_TIME 1323   // edit: HH:MM for the "at" option
 
 // Edit > Settings... dialog (licium_settings.cpp). First row is the global UI
 // text scale; built to grow more settings later.

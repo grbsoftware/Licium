@@ -36,7 +36,8 @@ param(
     [switch]$Swarm,          # generation-side ACO state from Licium\ (LXS<genver>)
     [string]$Seek = "",      # rank-side profile, e.g. "threads"
     [switch]$NoRefresh,      # leave the X browser alone at the end
-    [switch]$NoHarvest       # skip Phase 0 (queue-leftover early haul)
+    [switch]$NoHarvest,      # skip Phase 0 (queue-leftover early haul)
+    [string]$GradeWhen = "now"  # Phase B timing: now | idle | HH:MM (24h)
 )
 
 $ErrorActionPreference = "Stop"
@@ -163,6 +164,36 @@ Write-Host "PHASE A: scan [$Start, $End) emit $Emit ($(if($Swarm){'swarm'}elseif
 & $Prospector @argsList
 if ($LASTEXITCODE -ne 0) { throw "prospector failed ($LASTEXITCODE)" }
 Add-Content -Path $RangesLog -Value "$Start $End $(Get-Date -Format s)" -Encoding ascii
+
+# ---- Grading schedule: when to run Phase B ----------------------------------
+# Grading is already non-disruptive (the triage worker renders off-screen), so
+# "now" just proceeds. "idle"/"HH:MM" hold Phase B until the machine is idle or
+# a set time. The engine overlay shows "waiting to grade" meanwhile by parsing
+# the DEFER-WAIT line below (it is checked after PHASE B, so grading wins once
+# it starts). The scan and its emitted rolls are already on disk before any wait.
+if ($GradeWhen -eq "idle") {
+    Write-Host "DEFER-WAIT: grading when idle"
+    if (-not ([System.Management.Automation.PSTypeName]'LSearch.Idle').Type) {
+        Add-Type -Name Idle -Namespace LSearch -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+[DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO p);
+public static uint IdleMs() {
+    var i = new LASTINPUTINFO(); i.cbSize = (uint)Marshal.SizeOf(i);
+    GetLastInputInfo(ref i); return ((uint)Environment.TickCount) - i.dwTime;
+}
+'@
+    }
+    while ([LSearch.Idle]::IdleMs() -lt 300000) { Start-Sleep -Seconds 5 }   # 5 min idle
+    Write-Host "DEFER done: machine idle - grading now"
+}
+elseif ($GradeWhen -match '^\d{1,2}:\d{2}$') {
+    $hm = $GradeWhen -split ':'
+    $target = (Get-Date).Date.AddHours([int]$hm[0]).AddMinutes([int]$hm[1])
+    if ($target -le (Get-Date)) { $target = $target.AddDays(1) }   # already past -> tomorrow
+    Write-Host ("DEFER-WAIT: grading at {0:HH:mm}" -f $target)
+    while ((Get-Date) -lt $target) { Start-Sleep -Seconds 15 }
+    Write-Host "DEFER done: scheduled time reached - grading now"
+}
 
 # ---- Phase B: triage everything untriaged -----------------------------------
 Write-Host "PHASE B: triage"

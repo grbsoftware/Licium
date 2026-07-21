@@ -1161,7 +1161,7 @@ static int     g_searchScanTicked = 0;    // a real scan tick has been parsed
 
 static int LaunchSearch(unsigned long long start, unsigned long long count,
                         int emit, int threads, int swarm, int seek, int refresh,
-                        int noHarvest)
+                        int noHarvest, const wchar_t* gradeWhen)
 {
     wchar_t script[MAX_PATH];
     if (!ResolveSearchScript(script)) return 0;
@@ -1176,12 +1176,13 @@ static int LaunchSearch(unsigned long long start, unsigned long long count,
     // search seems to vanish (e.g. the script's range-overlap guard threw).
     wchar_t cmd[2048];
     swprintf(cmd, L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-                  L"\"& '%s' -Start %llu -Count %llu -Emit %d -Threads %d%s%s%s%s *>> '%s'\"",
+                  L"\"& '%s' -Start %llu -Count %llu -Emit %d -Threads %d%s%s%s%s -GradeWhen '%s' *>> '%s'\"",
              script, start, count, emit, threads,
              swarm     ? L" -Swarm"        : L"",
              seek      ? L" -Seek threads" : L"",
              refresh   ? L""               : L" -NoRefresh",
              noHarvest ? L" -NoHarvest"    : L"",
+             gradeWhen,
              logPath);
 
     STARTUPINFOW si = { sizeof(si) };
@@ -1221,6 +1222,10 @@ static INT_PTR CALLBACK SearchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_LS_EMIT,    L"40");
         SetDlgItemTextW(dlg, IDC_LS_THREADS, L"10");
         CheckDlgButton(dlg, IDC_LS_REFRESH, BST_CHECKED);
+        // Grading schedule: default to grading right away; the "At" field holds a
+        // sensible off-hours time in case the user switches to it.
+        CheckRadioButton(dlg, IDC_LS_GRADE_NOW, IDC_LS_GRADE_AT, IDC_LS_GRADE_NOW);
+        SetDlgItemTextW(dlg, IDC_LS_GRADE_TIME, L"02:00");
         return TRUE;
     }
     case WM_COMMAND:
@@ -1241,11 +1246,31 @@ static INT_PTR CALLBACK SearchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                             L"Run Latent Search", MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
+            // When to grade (Phase B): now / when idle / at a clock time. The
+            // value is passed straight to the script's -GradeWhen.
+            wchar_t gradeWhen[16] = L"now";
+            if (IsDlgButtonChecked(dlg, IDC_LS_GRADE_IDLE) == BST_CHECKED)
+                wcscpy_s(gradeWhen, L"idle");
+            else if (IsDlgButtonChecked(dlg, IDC_LS_GRADE_AT) == BST_CHECKED)
+            {
+                wchar_t t[16];
+                GetDlgItemTextW(dlg, IDC_LS_GRADE_TIME, t, 16);
+                int hh = -1, mm = -1;
+                if (swscanf(t, L"%d:%d", &hh, &mm) != 2 ||
+                    hh < 0 || hh > 23 || mm < 0 || mm > 59)
+                {
+                    MessageBoxW(dlg, L"Enter the grading time as HH:MM (24-hour), e.g. 02:00.",
+                                L"Run Latent Search", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                swprintf(gradeWhen, L"%02d:%02d", hh, mm);
+            }
             if (!LaunchSearch(start, count, emit, threads,
                               IsDlgButtonChecked(dlg, IDC_LS_SWARM)   == BST_CHECKED,
                               IsDlgButtonChecked(dlg, IDC_LS_SEEK)    == BST_CHECKED,
                               IsDlgButtonChecked(dlg, IDC_LS_REFRESH) == BST_CHECKED,
-                              IsDlgButtonChecked(dlg, IDC_LS_NOHARVEST) == BST_CHECKED))
+                              IsDlgButtonChecked(dlg, IDC_LS_NOHARVEST) == BST_CHECKED,
+                              gradeWhen))
             {
                 MessageBoxW(dlg, L"Could not launch tools\\latent_search.ps1 - is the "
                                  L"exe running outside its repo tree?",
@@ -1360,6 +1385,24 @@ static void SearchPollLog(void)
         g_searchFrac  = (g_searchEmit > 0 && done < g_searchEmit)
                         ? (float)done / g_searchEmit : 1.0f;
         swprintf(g_searchText, L"search: triage %d/%d", done, g_searchEmit);
+        return;
+    }
+    // Deferred grading: the scan is done but Phase B is waiting (idle / a set
+    // time). No progress to show, so borrow the title-only triage phase. Checked
+    // AFTER Phase B (once grading starts that wins) and BEFORE the scan-tick line
+    // (leftover ~100% ticks must not override the wait).
+    const wchar_t* defer = LastOccur(txt, L"DEFER-WAIT");
+    if (defer)
+    {
+        g_searchPhase = LS_TRIAGE;
+        int hh = 0, mm = 0;
+        const wchar_t* at = wcsstr(defer, L"at ");
+        if (wcsstr(defer, L"idle"))
+            wcscpy_s(g_searchText, L"search: waiting to grade (idle)");
+        else if (at && swscanf(at, L"at %d:%d", &hh, &mm) == 2)
+            swprintf(g_searchText, L"search: waiting to grade at %02d:%02d", hh, mm);
+        else
+            wcscpy_s(g_searchText, L"search: waiting to grade");
         return;
     }
     const wchar_t* tick = LastOccur(txt, L"...~");

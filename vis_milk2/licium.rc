@@ -30,7 +30,7 @@ IDR_LICIUM_SPLASH RCDATA "..\\brand\\licium_splash.png"
 
 // Latent > Run search... — GUI front end for tools\latent_search.ps1
 // (scan -> triage -> X). Field meanings mirror the script's parameters.
-IDD_LATENT_SEARCH DIALOGEX 0, 0, 250, 166
+IDD_LATENT_SEARCH DIALOGEX 0, 0, 250, 232
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Run Latent Search"
 FONT 9, "Segoe UI"
@@ -48,8 +48,15 @@ BEGIN
     AUTOCHECKBOX    "Seek threads (filament-profile ranking)", IDC_LS_SEEK,    10, 100, 230, 10
     AUTOCHECKBOX    "Open X with the haul when done",          IDC_LS_REFRESH, 10, 114, 230, 10
     AUTOCHECKBOX    "Skip early haul (scan straight away)",     IDC_LS_NOHARVEST, 10, 128, 230, 10
-    DEFPUSHBUTTON   "Run",    IDOK,     130, 146, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 188, 146, 50, 14
+    GROUPBOX        "Grade results (background render)", -1,   10, 144, 230, 42
+    AUTORADIOBUTTON "Now",        IDC_LS_GRADE_NOW,  18, 156,  40, 10, WS_GROUP
+    AUTORADIOBUTTON "When idle",  IDC_LS_GRADE_IDLE, 60, 156,  56, 10
+    AUTORADIOBUTTON "At",         IDC_LS_GRADE_AT,  120, 156,  26, 10
+    EDITTEXT        IDC_LS_GRADE_TIME,               148, 154,  34, 12
+    LTEXT           "(HH:MM, 24h)", -1,             186, 156,  48, 10
+    LTEXT           "Grading renders each result in an off-screen window - you can keep browsing and voting in Licium while it runs.", -1, 10, 190, 230, 18, WS_GROUP
+    DEFPUSHBUTTON   "Run",    IDOK,     130, 212, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 188, 212, 50, 14
 END
 
 // Edit > Settings... — global preferences. Text size is the first row; the
