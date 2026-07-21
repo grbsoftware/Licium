@@ -41,6 +41,15 @@ static void HostSpLog(const char *msg)
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
 }
 
+static char g_senderName[256] = "Licium";
+
+void HostSpoutSetName(const char *name)
+{
+    if (!name || !name[0]) return;
+    strncpy(g_senderName, name, sizeof(g_senderName) - 1);
+    g_senderName[sizeof(g_senderName) - 1] = 0;
+}
+
 void HostSpoutInit(void)
 {
     if (g_init || g_failed) return;
@@ -50,12 +59,13 @@ void HostSpoutInit(void)
     if (!g_spout.OpenDirectX9(GetDesktopWindow())) { g_failed = true; HostSpLog("OpenDirectX9 failed"); return; }
     g_spDev = g_spout.GetDX9device();
     if (!g_spDev)                { g_failed = true; HostSpLog("GetDX9device null"); return; }
-    // Sender name = the app name. Also keeps it distinct from the old
-    // MilkDrop3.exe (which senders as "MilkDrop") so both can run at once.
-    // Grab with: spout_grab.exe --sender Licium
-    g_spout.SetSenderName("Licium");
+    // Sender name = the app name (default "Licium"), or a distinct worker name
+    // set via HostSpoutSetName. Distinct from the old MilkDrop3.exe (senders as
+    // "MilkDrop") so both can run at once. Grab with: spout_grab --sender <name>
+    g_spout.SetSenderName(g_senderName);
     g_init = true;
-    HostSpLog("Spout sender 'Licium' ready");
+    char msg[320]; sprintf(msg, "Spout sender '%s' ready", g_senderName);
+    HostSpLog(msg);
 }
 
 static void ReleaseSurfaces(void)

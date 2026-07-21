@@ -864,6 +864,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
 {
     srand((unsigned)GetTickCount());
 
+    // --worker: this is a triage/background render instance, not the user's
+    // foreground app. It renders off-screen under a distinct Spout name so it
+    // never collides with a foreground "Licium" and never steals the screen.
+    // The render loop has no focus/position/occlusion check, and D3D9 keeps
+    // presenting off a fully off-desktop window (only MINIMIZE freezes it), so
+    // an off-screen worker produces the same live Spout frames as an on-screen
+    // one. Verified before this was built (off-screen brightness kept varying).
+    const bool g_worker = (wcsstr(GetCommandLineW(), L"--worker") != NULL);
+
     // Install the localization stub before the plugin can look up any string,
     // and point resource-loading HINSTANCEs at our own exe module (its menu,
     // dialogs and string table are compiled in from plugin.rc).
@@ -877,8 +886,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
 
     // Splash up first: it paints synchronously here, sits topmost through
     // engine init, and holds until the user dismisses it (Continue/click/Esc);
-    // the render loop animates the fade-out (HostSplashTick).
-    HostSplashShow(hInstance, 0);
+    // the render loop animates the fade-out (HostSplashTick). A worker has no
+    // one watching and must not throw a topmost window on screen — skip it.
+    if (!g_worker) HostSplashShow(hInstance, 0);
 
     // Hand the plugin a NULL Winamp window + our own hInstance. NULL window ->
     // all its IPC SendMessages are guarded and no-op; hInstance lets its
@@ -904,8 +914,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     // WM_SIZE handling resizes the backbuffer, exactly as for a user-driven
     // maximize. Dev/snapshot runs stay windowed: the flag is only 1 if the
     // last session actually ended maximized.
-    if (g_hostMainWnd && g_hostIniFile[0] &&
-        GetPrivateProfileIntW(L"settings", L"bMainWndMaximized", 0, g_hostIniFile))
+    if (g_worker)
+    {
+        // Park the whole window off the desktop without activating it, so it
+        // renders (and feeds Spout) but never covers the user's work or takes
+        // focus. NOT minimize — minimize occludes the D3D9 device and freezes
+        // Present (the stale-frame giveaway). SWP_NOSIZE keeps the backbuffer.
+        if (g_hostMainWnd)
+            SetWindowPos(g_hostMainWnd, NULL, -4000, -4000, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    else if (g_hostMainWnd && g_hostIniFile[0] &&
+             GetPrivateProfileIntW(L"settings", L"bMainWndMaximized", 0, g_hostIniFile))
         ShowWindow(g_hostMainWnd, SW_MAXIMIZE);
 
     // M1c: real audio. Tap the default output device via WASAPI loopback so the
@@ -915,7 +935,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
     bool realAudio = WasapiAudioStart() != 0;
 
     // M1d: start the Spout sender so a headless receiver (spout_grab) can grab
-    // the real render. The engine calls HostSpoutSendFrame() each frame.
+    // the real render. The engine calls HostSpoutSendFrame() each frame. A
+    // worker publishes under a distinct name so the foreground "Licium" and the
+    // triage worker can run side by side without the grabber crossing them.
+    if (g_worker) HostSpoutSetName("LiciumTriage");
     HostSpoutInit();
 
     // Winamp waveform format: unsigned char 0..255, 128 = zero line. The

@@ -20,8 +20,14 @@
 extern "C" {
 #endif
 
-// Create the "MilkDrop" Spout sender (on Spout's own DX9Ex device). Call once
-// after the engine is initialized. No-op on repeat / after a failure.
+// Override the Spout sender name (default "Licium"). Call BEFORE HostSpoutInit.
+// Worker/triage instances use a distinct name (e.g. "LiciumTriage") so a second
+// off-screen instance never collides with the user's foreground "Licium" sender
+// (spout_grab reading the wrong window = the false-verification bug from M1d).
+void HostSpoutSetName(const char *name);
+
+// Create the Spout sender (on Spout's own DX9Ex device) under the current name.
+// Call once after the engine is initialized. No-op on repeat / after a failure.
 void HostSpoutInit(void);
 
 // Publish the just-rendered frame. Call right before the engine's Present, so
