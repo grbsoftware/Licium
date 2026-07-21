@@ -144,7 +144,7 @@ if (-not $NoHarvest) {
                 if ($LASTEXITCODE -ne 0) { throw "harvest emit failed for $($c.Item2)" }
                 Write-Host ("  harvested {0} score={1:0.00000}" -f $c.Item2, $c.Item1)
             }
-            & $TriageScript -KeepOpen
+            & $TriageScript   # runs its own off-screen worker; closes it when done
             if (Refresh-X) { Write-Host "HARVEST done: early haul in X ($take rolls) - scanning next" }
             else           { Write-Host "HARVEST done: $take rolls triaged (Licium not up; X will show them next open)" }
         } else {
@@ -166,7 +166,7 @@ Add-Content -Path $RangesLog -Value "$Start $End $(Get-Date -Format s)" -Encodin
 
 # ---- Phase B: triage everything untriaged -----------------------------------
 Write-Host "PHASE B: triage"
-& $TriageScript -KeepOpen
+& $TriageScript   # off-screen worker; the user's foreground Licium is untouched
 # latent_triage.ps1 throws on its own failures (ErrorActionPreference Stop);
 # reaching here means verdicts + contact sheet are written and Licium is up.
 

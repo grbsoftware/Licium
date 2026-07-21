@@ -79,20 +79,19 @@ public static int LoadPreset(IntPtr hwnd, string path) {
 Add-Type -AssemblyName System.Drawing
 
 # ---- launch Licium detached (WMI — a child process would die with the shell) -
+$script:WorkerPid = 0
 function Start-Licium {
-    $existing = Get-Process -Name "Licium" -ErrorAction SilentlyContinue
-    if ($existing) { return $existing.Id }
+    # ALWAYS launch our OWN --worker instance; never reuse a running Licium.
+    # The worker renders off-screen under the 'LiciumTriage' Spout name and has
+    # no splash, so it can grade rolls while the user keeps browsing/voting in
+    # their foreground 'Licium' -- and, critically, triage can never clobber or
+    # kill that foreground window (the reuse-then-Stop-Process-all-Licium path
+    # is exactly what froze/closed a live session mid-triage).
     $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine = "`"$Exe`""; CurrentDirectory = $ReleaseDir }
+        CommandLine = "`"$Exe`" --worker"; CurrentDirectory = $ReleaseDir }
     if ($r.ReturnValue -ne 0) { throw "WMI launch failed rc=$($r.ReturnValue) (rc=9 after a build: suspect AV quarantine)" }
-    Start-Sleep -Seconds 4
-    # The splash holds forever until clicked — and swallows posted messages.
-    $splash = [LT.W]::Find([uint32]$r.ProcessId, "LiciumSplash")
-    if ($splash -ne [IntPtr]::Zero) {
-        [LT.W]::PostMessageW($splash, 0x0201, [IntPtr]1, [IntPtr]0) | Out-Null  # WM_LBUTTONDOWN
-        [LT.W]::PostMessageW($splash, 0x0202, [IntPtr]0, [IntPtr]0) | Out-Null  # WM_LBUTTONUP
-        Start-Sleep -Milliseconds 800
-    }
+    Start-Sleep -Seconds 4   # no splash to dismiss in worker mode
+    $script:WorkerPid = $r.ProcessId
     return $r.ProcessId
 }
 
@@ -106,8 +105,11 @@ function Test-EngineAlive([uint32]$ProcId) {
 }
 
 function Restart-Engine {
-    Get-Process -Name "Licium" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    # Kill ONLY our worker (by pid), never every Licium -- a foreground app the
+    # user is browsing in must survive a worker restart.
+    if ($script:WorkerPid) {
+        Stop-Process -Id $script:WorkerPid -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Seconds 2
     $p = Start-Licium
     $h = Get-MainWindow ([uint32]$p)
@@ -129,7 +131,7 @@ function Get-MainWindow([uint32]$ProcId) {
 
 # ---- grab + measure ---------------------------------------------------------
 function Grab-Frames([string]$Prefix, [int]$Frames, [int]$IntervalMs) {
-    & $Grabber --sender Licium --frames $Frames --interval $IntervalMs --prefix $Prefix --out $OutDir | Out-Null
+    & $Grabber --sender LiciumTriage --frames $Frames --interval $IntervalMs --prefix $Prefix --out $OutDir | Out-Null
     return (Get-ChildItem "$OutDir\$Prefix*.png" | Sort-Object Name)
 }
 
@@ -294,7 +296,10 @@ if ($results.Count -gt 0) {
 }
 
 if (-not $KeepOpen) {
-    Get-Process -Name "Licium" -ErrorAction SilentlyContinue | Stop-Process -Force
+    # Close ONLY our worker, by pid -- leave any foreground Licium alone.
+    if ($script:WorkerPid) {
+        Stop-Process -Id $script:WorkerPid -Force -ErrorAction SilentlyContinue
+    }
 }
 $tally = $results | Group-Object { $_.Verdict } | ForEach-Object { "$($_.Name)=$($_.Count)" }
 Write-Host "done: $($tally -join ', ')  -> $Verdicts"
