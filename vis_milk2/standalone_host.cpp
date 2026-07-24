@@ -954,6 +954,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrev*/, PSTR /*cmd*/, int /
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
         {
             if (msg.message == WM_QUIT) { running = false; break; }
+            // Modeless Tune dialogs get first crack so their trackbars/edits
+            // handle keyboard nav (Tab/arrows) without stealing the render.
+            HWND tdlg = LatentTuneActiveDlg();
+            if (tdlg && IsDialogMessage(tdlg, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }

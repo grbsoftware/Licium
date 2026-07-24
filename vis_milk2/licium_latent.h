@@ -63,6 +63,12 @@ void LatentBrowserRender(struct IDirect3DDevice9* dev, int w, int h);
 // Help > Show intro pages again: clear the landing page's "don't show again".
 void LatentResetIntro(void);
 
+// Tune cockpit: the Color group is a MODELESS floating dialog (summoned with
+// 'c' in the browser). Because it is modeless, the host message loop must give
+// it first crack at each message so its trackbars/edits get keyboard nav -
+// standalone_host.cpp calls this and, when non-NULL, IsDialogMessage()es it.
+HWND LatentTuneActiveDlg(void);
+
 // Menu accessors (Latent > Open rolls folder / Open notes file).
 const wchar_t* LatentGetRollsDir(void);
 const wchar_t* LatentGetNotesPath(void);

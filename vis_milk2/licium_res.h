@@ -40,4 +40,20 @@
 #define IDC_SET_WARN      1312   // occlusion warning text
 #define IDC_SET_RESET     1313   // reset to default
 
+// Tune cockpit - Color group (licium_latent.cpp). MODELESS floating dialog
+// summoned with 'c' in the X browser: shape the SELECTED roll's color field
+// (hue/sat/light/contrast) live over the moving visual. Each row = trackbar +
+// editable number field (two-way). Values are a reversible per-roll overlay in
+// Licium\latent_tunings.txt - the .milk is never overwritten. Ids in 134x.
+#define IDD_TUNE_COLOR      132
+#define IDC_TUNE_HUE      1340   // trackbar, -180..180 (degrees)
+#define IDC_TUNE_HUEVAL   1341   // editable number
+#define IDC_TUNE_SAT      1342   // trackbar, -100..100 (percent)
+#define IDC_TUNE_SATVAL   1343
+#define IDC_TUNE_LIGHT    1344   // trackbar, -100..100
+#define IDC_TUNE_LIGHTVAL 1345
+#define IDC_TUNE_CONTRAST 1346   // trackbar, -100..100
+#define IDC_TUNE_CONVAL   1347
+#define IDC_TUNE_RESET    1348   // snap all knobs back to "as rolled" (center)
+
 #endif // LICIUM_RES_H

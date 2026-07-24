@@ -77,6 +77,36 @@ BEGIN
     PUSHBUTTON  "Cancel",   IDCANCEL,                        186, 126, 48, 14
 END
 
+// Tune cockpit - Color group. MODELESS (CreateDialogParamW) so the visual
+// keeps playing while you drag; pumped by the host loop via IsDialogMessage.
+// Each row is a trackbar + an editable number field kept in two-way sync.
+IDD_TUNE_COLOR DIALOGEX 0, 0, 240, 150
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Tune - Color"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT       "Hue",       -1,               10, 14, 46, 10
+    CONTROL     "", IDC_TUNE_HUE, "msctls_trackbar32",
+                TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 10, 130, 18
+    EDITTEXT    IDC_TUNE_HUEVAL,                             192, 12,  38, 12, ES_AUTOHSCROLL
+    LTEXT       "Saturation", -1,               10, 38, 46, 10
+    CONTROL     "", IDC_TUNE_SAT, "msctls_trackbar32",
+                TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 34, 130, 18
+    EDITTEXT    IDC_TUNE_SATVAL,                             192, 36,  38, 12, ES_AUTOHSCROLL
+    LTEXT       "Light",      -1,               10, 62, 46, 10
+    CONTROL     "", IDC_TUNE_LIGHT, "msctls_trackbar32",
+                TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 58, 130, 18
+    EDITTEXT    IDC_TUNE_LIGHTVAL,                           192, 60,  38, 12, ES_AUTOHSCROLL
+    LTEXT       "Contrast",   -1,               10, 86, 46, 10
+    CONTROL     "", IDC_TUNE_CONTRAST, "msctls_trackbar32",
+                TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 82, 130, 18
+    EDITTEXT    IDC_TUNE_CONVAL,                             192, 84,  38, 12, ES_AUTOHSCROLL
+    LTEXT       "Center = as rolled. Saved per roll; the original is never overwritten.",
+                -1,                                           10, 106, 220, 18
+    PUSHBUTTON  "As rolled",  IDC_TUNE_RESET,   112, 128,  60, 14
+    PUSHBUTTON  "Close",      IDCANCEL,         180, 128,  50, 14
+END
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION LICIUM_VER_COMMA
  PRODUCTVERSION LICIUM_VER_COMMA

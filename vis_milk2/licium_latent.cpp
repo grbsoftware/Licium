@@ -21,14 +21,20 @@
 
 #include "api.h"
 #include "licium_latent.h"
+#include "licium_res.h"
+#include "licium_oklab.h"
 #include "plugin.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <math.h>
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 
 extern CPlugin g_plugin;
+extern "C" HWND HostGetMainWnd(void);   // standalone_host.cpp - dialog parent
 
 // ================================ data model =================================
 
@@ -102,8 +108,9 @@ static int g_state  = LB_CLOSED;
 static int g_sel    = 0;
 static int g_scroll = 0;
 
-static wchar_t g_rollsDir[MAX_PATH]  = {0};
-static wchar_t g_notesPath[MAX_PATH] = {0};
+static wchar_t g_rollsDir[MAX_PATH]     = {0};
+static wchar_t g_notesPath[MAX_PATH]    = {0};
+static wchar_t g_tuningsPath[MAX_PATH]  = {0};
 
 static void ResolvePaths(void)
 {
@@ -113,7 +120,8 @@ static void ResolvePaths(void)
     // in the Licium\ root next to palette_votes.txt.
     swprintf(g_rollsDir, L"%slatent\\", g_plugin.m_szPresetDir);
     CreateDirectoryW(g_rollsDir, NULL);
-    swprintf(g_notesPath, L"%slatent_notes.txt", g_plugin.m_szMilkdrop2Path);
+    swprintf(g_notesPath,   L"%slatent_notes.txt",   g_plugin.m_szMilkdrop2Path);
+    swprintf(g_tuningsPath, L"%slatent_tunings.txt", g_plugin.m_szMilkdrop2Path);
 }
 
 extern "C" const wchar_t* LatentGetRollsDir(void)  { ResolvePaths(); return g_rollsDir; }
@@ -400,11 +408,21 @@ static void SaveNote(LatentRoll* r, const wchar_t* text)
 
 static int g_palCycle = 0;   // 0 = roll's own palette; 1..N = liked-palette index
 
+// Tune cockpit - Color group state (defined further down, forward-declared here
+// so LoadSelection can re-apply a roll's saved color tuning as you browse).
+static int  g_curTune[4] = { 0, 0, 0, 0 };   // hue(deg) sat light contrast; 0 = as rolled
+static bool LoadTuneFor(const wchar_t* wid, int out[4]);
+static void ApplyCurTuneLive(void);
+static void TuneRefreshDlg(void);
+
 static void LoadSelection(void)
 {
     g_palCycle = 0;                                       // new roll -> own palette
-    if (g_count > 0)
-        g_plugin.LoadPreset(g_rolls[g_sel].file, 0.0f);   // hard cut: live browse
+    if (g_count <= 0) return;
+    if (!LoadTuneFor(g_rolls[g_sel].id, g_curTune))       // reversible per-roll overlay
+        g_curTune[0] = g_curTune[1] = g_curTune[2] = g_curTune[3] = 0;
+    ApplyCurTuneLive();                                   // raw roll if neutral, else recolored
+    TuneRefreshDlg();                                     // sync an open Color dialog
 }
 
 extern "C" void LatentBrowserOpen(void)
@@ -727,6 +745,285 @@ static void CyclePalette(void)
         g_plugin.LoadPreset(temp, 0.0f);                 // instant, in-engine hard cut
 }
 
+// ============================ Tune cockpit: Color ============================
+//
+// Shape the SELECTED roll's color field live, WITHOUT touching its plot. The
+// four knobs act in oklch (perceptually even - see licium_oklab.h): hue rotates
+// h, saturation scales C, light shifts L, contrast pushes L away from mid. They
+// transform the roll's OWN dressed color literals (the same lines
+// RecolorRollFile targets), so any lineage works and the relationships between
+// the colors hold. Center (0) on every knob == as rolled. Values are a
+// reversible per-roll overlay in latent_tunings.txt (later-wins, same family as
+// votes/tags/notes); the roll .milk is never overwritten - a throwaway
+// _tunecolor.milk carries the recolor, exactly like _palcycle.milk.
+
+static bool TuneNeutral(const int* t)
+{
+    return !t[0] && !t[1] && !t[2] && !t[3];
+}
+
+// Transform the float3(...) literal at f3pos through oklch by the knob values,
+// then write it back via SubFloat3. No-op when no token sits there.
+static void TuneColorAt(std::string& line, size_t f3pos, const int* t)
+{
+    if (f3pos == std::string::npos) return;
+    size_t open = line.find('(', f3pos);
+    if (open == std::string::npos) return;
+    float c[3];
+    if (sscanf(line.c_str() + open + 1, "%f%*[, ]%f%*[, ]%f", &c[0], &c[1], &c[2]) != 3)
+        return;
+
+    float L, a, b2;
+    LicSrgbToOklab(c[0], c[1], c[2], &L, &a, &b2);
+    float C = sqrtf(a * a + b2 * b2);
+    float h = atan2f(b2, a);
+
+    h += t[0] * (3.14159265f / 180.0f);               // hue: degrees
+    C *= (1.0f + t[1] / 100.0f);                       // saturation: -100..100 -> x0..x2
+    if (C < 0.0f) C = 0.0f;
+    L  = 0.5f + (L - 0.5f) * (1.0f + t[3] / 100.0f);  // contrast about mid
+    L += (t[2] / 100.0f) * 0.30f;                     // light: +-100 -> +-0.30 L
+    if (L < 0.0f) L = 0.0f;
+    if (L > 1.0f) L = 1.0f;
+
+    float r, g, b;
+    LicOklchToSrgbClipped(L, C, h, &r, &g, &b);
+    float o[3] = { r, g, b };
+    SubFloat3(line, f3pos, o, ", ");
+}
+
+// Like RecolorRollFile, but transforms the EXISTING color literals in place
+// rather than replacing them from a palette. Same target lines, so it stays in
+// sync with the recolor path. Assumes t is non-neutral.
+static bool TuneColorsInFile(const wchar_t* src, const wchar_t* dst, const int* t)
+{
+    FILE* f = _wfopen(src, L"rb");
+    if (!f) return false;
+    std::string data;
+    { char b[4096]; size_t r; while ((r = fread(b, 1, sizeof(b), f)) > 0) data.append(b, r); }
+    fclose(f);
+
+    std::string out;
+    out.reserve(data.size() + 64);
+    size_t i = 0;
+    while (i < data.size())
+    {
+        size_t nl  = data.find('\n', i);
+        size_t end = (nl == std::string::npos) ? data.size() : nl;
+        std::string line = data.substr(i, end - i);
+
+        if (line.find("= prev*") != std::string::npos &&
+            line.find("* f *")   != std::string::npos)
+        {
+            TuneColorAt(line, line.rfind("float3(", line.find("* f *")), t);
+        }
+        else if (line.find("float3 ramp = lerp(") != std::string::npos)
+        {
+            size_t p1 = line.find("float3(");
+            size_t p2 = line.find("float3(", p1 + 1);
+            TuneColorAt(line, p2, t);   // later token first (SubFloat3 shifts length)
+            TuneColorAt(line, p1, t);
+        }
+        else if (line.find("ramp = lerp(ramp,") != std::string::npos)
+        {
+            TuneColorAt(line, line.find("float3("), t);
+        }
+        else if (line.find("ret = ramp + float3(") != std::string::npos)
+        {
+            TuneColorAt(line, line.find("float3("), t);
+        }
+
+        out += line;
+        if (nl != std::string::npos) out += '\n';
+        i = end + 1;
+    }
+
+    FILE* g = _wfopen(dst, L"wb");
+    if (!g) return false;
+    fwrite(out.data(), 1, out.size(), g);
+    fclose(g);
+    return true;
+}
+
+// latent_tunings.txt: "<id> hue sat light contrast" lines, later-wins. Ids are
+// ascii (LXn-XXXXXXXX), so a narrow parse is safe.
+static bool LoadTuneFor(const wchar_t* wid, int out[4])
+{
+    out[0] = out[1] = out[2] = out[3] = 0;
+    char id[LATENT_ID_LEN];
+    int n = 0; for (; wid[n] && n < LATENT_ID_LEN - 1; n++) id[n] = (char)wid[n];
+    id[n] = 0;
+
+    FILE* f = _wfopen(g_tuningsPath, L"rb");
+    if (!f) return false;
+    bool found = false;
+    char line[128], lid[LATENT_ID_LEN]; int a, b, c, d;
+    while (fgets(line, sizeof(line), f))
+    {
+        if (sscanf(line, "%19s %d %d %d %d", lid, &a, &b, &c, &d) != 5) continue;
+        if (strcmp(lid, id)) continue;
+        out[0] = a; out[1] = b; out[2] = c; out[3] = d; found = true;   // later wins
+    }
+    fclose(f);
+    return found;
+}
+
+static void SaveTuneFor(const wchar_t* wid, const int* t)
+{
+    char id[LATENT_ID_LEN];
+    int n = 0; for (; wid[n] && n < LATENT_ID_LEN - 1; n++) id[n] = (char)wid[n];
+    id[n] = 0;
+    FILE* f = _wfopen(g_tuningsPath, L"ab");
+    if (!f) return;
+    fprintf(f, "%s %d %d %d %d\n", id, t[0], t[1], t[2], t[3]);
+    fclose(f);
+}
+
+// Load the current selection through g_curTune (neutral = the raw roll).
+static void ApplyCurTuneLive(void)
+{
+    if (g_count <= 0) return;
+    LatentRoll* r = &g_rolls[g_sel];
+    if (TuneNeutral(g_curTune)) { g_plugin.LoadPreset(r->file, 0.0f); return; }
+    wchar_t temp[MAX_PATH];
+    swprintf(temp, L"%s_tunecolor.milk", g_rollsDir);   // not latent_* -> never scanned
+    if (TuneColorsInFile(r->file, temp, g_curTune))
+        g_plugin.LoadPreset(temp, 0.0f);
+    else
+        g_plugin.LoadPreset(r->file, 0.0f);
+}
+
+// ---- the modeless Color dialog ----------------------------------------------
+
+static HWND g_tuneDlg  = NULL;
+static bool g_tuneSync = false;   // guard reciprocal slider<->edit updates
+
+static const int TUNE_TB[4]  = { IDC_TUNE_HUE, IDC_TUNE_SAT, IDC_TUNE_LIGHT, IDC_TUNE_CONTRAST };
+static const int TUNE_ED[4]  = { IDC_TUNE_HUEVAL, IDC_TUNE_SATVAL, IDC_TUNE_LIGHTVAL, IDC_TUNE_CONVAL };
+static const int TUNE_MIN[4] = { -180, -100, -100, -100 };
+static const int TUNE_MAX[4] = {  180,  100,  100,  100 };
+
+// Push g_curTune into an open dialog's controls (after a browse move).
+static void TuneRefreshDlg(void)
+{
+    if (!g_tuneDlg) return;
+    g_tuneSync = true;
+    for (int i = 0; i < 4; i++)
+    {
+        SendMessageW(GetDlgItem(g_tuneDlg, TUNE_TB[i]), TBM_SETPOS, TRUE, g_curTune[i]);
+        SetDlgItemInt(g_tuneDlg, TUNE_ED[i], (UINT)g_curTune[i], TRUE);
+    }
+    g_tuneSync = false;
+}
+
+static int TuneRowFromTB(HWND h, HWND dlg)
+{
+    for (int i = 0; i < 4; i++) if (h == GetDlgItem(dlg, TUNE_TB[i])) return i;
+    return -1;
+}
+
+// Apply-and-persist the four current slider values to the selected roll.
+static void TuneCommitFromDlg(HWND dlg)
+{
+    for (int i = 0; i < 4; i++)
+        g_curTune[i] = (int)SendMessageW(GetDlgItem(dlg, TUNE_TB[i]), TBM_GETPOS, 0, 0);
+    ApplyCurTuneLive();
+    if (g_count > 0) SaveTuneFor(g_rolls[g_sel].id, g_curTune);
+}
+
+static INT_PTR CALLBACK TuneColorDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
+        InitCommonControlsEx(&icc);
+        g_tuneSync = true;
+        for (int i = 0; i < 4; i++)
+        {
+            HWND tb = GetDlgItem(dlg, TUNE_TB[i]);
+            SendMessageW(tb, TBM_SETRANGE,   TRUE, MAKELONG(TUNE_MIN[i], TUNE_MAX[i]));
+            SendMessageW(tb, TBM_SETTICFREQ, (i == 0) ? 90 : 50, 0);
+            SendMessageW(tb, TBM_SETPOS,     TRUE, g_curTune[i]);
+            SetDlgItemInt(dlg, TUNE_ED[i], (UINT)g_curTune[i], TRUE);
+        }
+        g_tuneSync = false;
+        return TRUE;
+    }
+
+    case WM_HSCROLL:
+    {
+        int row = TuneRowFromTB((HWND)lp, dlg);
+        if (row < 0) break;
+        int pos = (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0);
+        g_tuneSync = true;
+        SetDlgItemInt(dlg, TUNE_ED[row], (UINT)pos, TRUE);   // number tracks the slider
+        g_tuneSync = false;
+        SetTimer(dlg, 1, 140, NULL);                          // debounce the recolor
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        if (HIWORD(wp) == EN_CHANGE && !g_tuneSync)
+        {
+            for (int i = 0; i < 4; i++)
+                if (LOWORD(wp) == (WORD)TUNE_ED[i])
+                {
+                    BOOL ok = FALSE;
+                    int v = (int)GetDlgItemInt(dlg, TUNE_ED[i], &ok, TRUE);
+                    if (!ok) return TRUE;                     // mid-typing "-" / empty
+                    if (v < TUNE_MIN[i]) v = TUNE_MIN[i];
+                    if (v > TUNE_MAX[i]) v = TUNE_MAX[i];
+                    g_tuneSync = true;
+                    SendMessageW(GetDlgItem(dlg, TUNE_TB[i]), TBM_SETPOS, TRUE, v);  // slider snaps as you type
+                    g_tuneSync = false;
+                    SetTimer(dlg, 1, 140, NULL);
+                    return TRUE;
+                }
+            break;
+        }
+        switch (LOWORD(wp))
+        {
+        case IDC_TUNE_RESET:
+            g_tuneSync = true;
+            for (int i = 0; i < 4; i++)
+            {
+                SendMessageW(GetDlgItem(dlg, TUNE_TB[i]), TBM_SETPOS, TRUE, 0);
+                SetDlgItemInt(dlg, TUNE_ED[i], 0, TRUE);
+            }
+            g_tuneSync = false;
+            KillTimer(dlg, 1);
+            TuneCommitFromDlg(dlg);
+            return TRUE;
+        case IDCANCEL:
+            DestroyWindow(dlg);
+            return TRUE;
+        }
+        break;
+
+    case WM_TIMER:
+        if (wp == 1) { KillTimer(dlg, 1); TuneCommitFromDlg(dlg); }
+        return TRUE;
+
+    case WM_DESTROY:
+        g_tuneDlg = NULL;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void LiciumTuneColorOpen(HWND parent)
+{
+    if (g_tuneDlg) { SetForegroundWindow(g_tuneDlg); return; }
+    g_tuneDlg = CreateDialogParamW(GetModuleHandleW(NULL),
+                                   MAKEINTRESOURCEW(IDD_TUNE_COLOR),
+                                   parent, TuneColorDlgProc, 0);
+    if (g_tuneDlg) ShowWindow(g_tuneDlg, SW_SHOW);
+}
+
+extern "C" HWND LatentTuneActiveDlg(void) { return g_tuneDlg; }
+
 extern "C" int LatentBrowserHandleChar(int ch)
 {
     switch (g_state)
@@ -781,6 +1078,9 @@ extern "C" int LatentBrowserHandleChar(int ch)
             return 1;
         case 'p': case 'P':
             CyclePalette();
+            return 1;
+        case 'c': case 'C':
+            LiciumTuneColorOpen(HostGetMainWnd());   // floating Color knobs (modeless)
             return 1;
         case 'd': case 'D':
             BeginDescribe();
@@ -1005,7 +1305,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
             LatText(L"Y like  N pass  U clr",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
-            LatText(L"1-6 tag  D descr",
+            LatText(L"1-6 tag  D descr  c color",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
             LatText(g_hideVoted ? L"p pal  h show all  X close"
                                 : L"p pal  h hide voted  X close",
