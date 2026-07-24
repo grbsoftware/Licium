@@ -110,6 +110,17 @@ Proposed sidebar buttons (obvious grouping, each its own floating dialog):
 - Number fields right-aligned mono; sliders thin; group headers, not per-row
   borders.
 
+## Build status
+
+- **Color slice SHIPPED (2026-07-24, commit 185b25a).** `c` in the X browser
+  opens a modeless floating dialog (hue/sat/light/contrast, trackbar + editable
+  number each, two-way sync). Recolors the selected roll live via oklch on its
+  own color literals (`TuneColorsInFile`, same lines as `RecolorRollFile`, plot
+  untouched); reversible per-roll overlay `latent_tunings.txt`; re-applied on
+  browse. Verified in the engine (hue 150 -> gold roll went cyan, structure
+  intact). Gradient-smoothness curve NOT yet built (the one Color item left).
+- Motion + React slices: not started.
+
 ## Decisions (Gary, 2026-07-22 — still DRAFT overall, but these are settled)
 
 1. **Build order: cockpit FIRST, on cheap scalar sources.** React uses the
