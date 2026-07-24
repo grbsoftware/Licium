@@ -110,17 +110,27 @@ Proposed sidebar buttons (obvious grouping, each its own floating dialog):
 - Number fields right-aligned mono; sliders thin; group headers, not per-row
   borders.
 
-## Open calls (not decided)
+## Decisions (Gary, 2026-07-22 — still DRAFT overall, but these are settled)
 
-1. Movement target in v1 (deeper hook, adds motion to still rolls) or later?
-   — leaning **later**.
-2. Real pitch/note tracking vs. centroid-as-pitch — centroid is cheap and
-   honest for a single dial; note tracking is jittery for driving visuals.
-   Region routing is preferred over both.
-3. How much of React depends on the audio-texture layer (companion doc) vs.
-   the cheap scalar sources — React works on scalars *today*; the texture makes
-   it spatial/temporal *later*.
-4. Sidebar button set + exact key to summon the cockpit (consult
-   `docs/HOTKEYS.md` before binding).
+1. **Build order: cockpit FIRST, on cheap scalar sources.** React uses the
+   scalars the engine already computes (beat/volume/bass/mid/treble/centroid).
+   The audio-texture layer (companion doc) is a LATER upgrade that makes React
+   spatial/temporal — not a prerequisite.
+2. **Movement target = DEFERRED.** First cockpit ships Color + Motion
+   (smear/gain/smooth) + React on smear/color targets. `beat→movement` (the one
+   deeper hook) comes after the cheap knobs prove the UX.
+3. **First slice to build = COLOR knobs** (hue/sat/light/contrast + gradient
+   curve). Cheapest — extends the existing `CyclePalette`/`RecolorRollFile`
+   recolor path, no engine rebuild — and directly tames the "color-cycler" look
+   for the fastest visible result. Motion knobs (which need the att-scaling
+   engine hook) follow, then React routing.
+
+## Still open (build-time details, my call unless Gary weighs in)
+
+- Real pitch/note tracking vs. centroid-as-pitch — centroid is cheap and honest
+  for a single dial; region routing is preferred over both. (Leaning: ship
+  centroid + region sources, skip note tracking.)
+- Sidebar button set + exact key to summon the cockpit (consult
+  `docs/HOTKEYS.md` before binding).
 
 Companion doc: `AUDIO_TEXTURE_DESIGN.md` (the invisible layer React would tap).

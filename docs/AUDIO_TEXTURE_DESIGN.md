@@ -109,9 +109,18 @@ ladder (getting audio into geometry, rung 2/3) wants exactly this. If built, it
 makes *every* roll capable of the spatial/temporal reactivity Gary is chasing;
 the Tune cockpit knobs then become ways to *dial how hard each layer taps it*.
 
-## Open questions (nothing decided)
+## Decisions (Gary, 2026-07-22)
 
-1. Channel budget: 4 lanes now, or R+G first and grow?
+- **Sequencing: this layer comes AFTER the Tune cockpit ships on cheap
+  scalars.** It's the upgrade that makes React spatial/temporal, not the
+  starting point (see TUNE_COCKPIT_DESIGN decisions).
+- **Channel budget: start R+G** (R loudness + G rising/falling) — smaller
+  upload, simpler shaders, proves the concept. Add B (stereo) and A (tonality)
+  once it's working.
+
+## Open questions (build-time)
+
+1. ~~Channel budget~~ — decided: R+G first, grow to RGBA.
 2. Texture size / format (perf vs. detail).
 3. Where the FFT comes from — reuse the engine's internal FFT, or run our own
    in the host for full-resolution bins? (bass/mid/treb are coarse; the texture
