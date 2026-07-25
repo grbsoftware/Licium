@@ -55,5 +55,7 @@
 #define IDC_TUNE_CONTRAST 1346   // trackbar, -100..100
 #define IDC_TUNE_CONVAL   1347
 #define IDC_TUNE_RESET    1348   // snap all knobs back to "as rolled" (center)
+#define IDC_TUNE_CYCLE    1350   // trackbar, -100..100 (hue-cycle SPEED; sign=dir; 0=still)
+#define IDC_TUNE_CYCVAL   1351
 
 #endif // LICIUM_RES_H

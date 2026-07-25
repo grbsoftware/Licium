@@ -80,7 +80,7 @@ END
 // Tune cockpit - Color group. MODELESS (CreateDialogParamW) so the visual
 // keeps playing while you drag; pumped by the host loop via IsDialogMessage.
 // Each row is a trackbar + an editable number field kept in two-way sync.
-IDD_TUNE_COLOR DIALOGEX 0, 0, 240, 150
+IDD_TUNE_COLOR DIALOGEX 0, 0, 240, 176
 STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Tune - Color"
 FONT 9, "Segoe UI"
@@ -101,10 +101,14 @@ BEGIN
     CONTROL     "", IDC_TUNE_CONTRAST, "msctls_trackbar32",
                 TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 82, 130, 18
     EDITTEXT    IDC_TUNE_CONVAL,                             192, 84,  38, 12, ES_AUTOHSCROLL
-    LTEXT       "Center = as rolled. Saved per roll; the original is never overwritten.",
-                -1,                                           10, 106, 220, 18
-    PUSHBUTTON  "As rolled",  IDC_TUNE_RESET,   112, 128,  60, 14
-    PUSHBUTTON  "Close",      IDCANCEL,         180, 128,  50, 14
+    LTEXT       "Cycle",      -1,               10, 110, 46, 10
+    CONTROL     "", IDC_TUNE_CYCLE, "msctls_trackbar32",
+                TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,        58, 106, 130, 18
+    EDITTEXT    IDC_TUNE_CYCVAL,                             192, 108,  38, 12, ES_AUTOHSCROLL
+    LTEXT       "Cycle spins the hue over time (sign = direction). Center = as rolled; saved per roll.",
+                -1,                                           10, 130, 220, 18
+    PUSHBUTTON  "As rolled",  IDC_TUNE_RESET,   112, 154,  60, 14
+    PUSHBUTTON  "Close",      IDCANCEL,         180, 154,  50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO

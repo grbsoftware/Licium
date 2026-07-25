@@ -410,8 +410,9 @@ static int g_palCycle = 0;   // 0 = roll's own palette; 1..N = liked-palette ind
 
 // Tune cockpit - Color group state (defined further down, forward-declared here
 // so LoadSelection can re-apply a roll's saved color tuning as you browse).
-static int  g_curTune[4] = { 0, 0, 0, 0 };   // hue(deg) sat light contrast; 0 = as rolled
-static bool LoadTuneFor(const wchar_t* wid, int out[4]);
+#define TUNE_N 5                                 // hue sat light contrast cycle
+static int  g_curTune[TUNE_N] = { 0, 0, 0, 0, 0 };   // 0 on every knob = as rolled
+static bool LoadTuneFor(const wchar_t* wid, int out[TUNE_N]);
 static void ApplyCurTuneLive(void);
 static void TuneRefreshDlg(void);
 
@@ -420,7 +421,7 @@ static void LoadSelection(void)
     g_palCycle = 0;                                       // new roll -> own palette
     if (g_count <= 0) return;
     if (!LoadTuneFor(g_rolls[g_sel].id, g_curTune))       // reversible per-roll overlay
-        g_curTune[0] = g_curTune[1] = g_curTune[2] = g_curTune[3] = 0;
+        for (int i = 0; i < TUNE_N; i++) g_curTune[i] = 0;
     ApplyCurTuneLive();                                   // raw roll if neutral, else recolored
     TuneRefreshDlg();                                     // sync an open Color dialog
 }
@@ -759,7 +760,8 @@ static void CyclePalette(void)
 
 static bool TuneNeutral(const int* t)
 {
-    return !t[0] && !t[1] && !t[2] && !t[3];
+    for (int i = 0; i < TUNE_N; i++) if (t[i]) return false;
+    return true;
 }
 
 // Transform the float3(...) literal at f3pos through oklch by the knob values,
@@ -831,6 +833,24 @@ static bool TuneColorsInFile(const wchar_t* src, const wchar_t* dst, const int* 
         else if (line.find("ret = ramp + float3(") != std::string::npos)
         {
             TuneColorAt(line, line.find("float3("), t);
+            if (t[4] != 0)
+            {
+                // Cycle: rotate ret's hue around the grey axis by an angle that
+                // grows with the engine's `time` -> the colors continuously
+                // cycle (a rainbow appears to move). Rodrigues rotation about
+                // k=(1,1,1)/sqrt3 preserves luma. sign of t[4] = direction.
+                float f = (t[4] / 100.0f) * 1.2f;   // rad/sec at full deflection
+                char inj[320];
+                _snprintf(inj, sizeof(inj) - 1,
+                    " float _hA=%.5f*time; float _hc=cos(_hA);"
+                    " float3 _hk=float3(0.5773503,0.5773503,0.5773503);"
+                    " ret=ret*_hc+cross(_hk,ret)*sin(_hA)+_hk*dot(_hk,ret)*(1.0-_hc);",
+                    f);
+                inj[sizeof(inj) - 1] = 0;
+                size_t cr = line.find('\r');
+                if (cr == std::string::npos) line += inj;
+                else                          line.insert(cr, inj);
+            }
         }
 
         out += line;
@@ -847,9 +867,9 @@ static bool TuneColorsInFile(const wchar_t* src, const wchar_t* dst, const int* 
 
 // latent_tunings.txt: "<id> hue sat light contrast" lines, later-wins. Ids are
 // ascii (LXn-XXXXXXXX), so a narrow parse is safe.
-static bool LoadTuneFor(const wchar_t* wid, int out[4])
+static bool LoadTuneFor(const wchar_t* wid, int out[TUNE_N])
 {
-    out[0] = out[1] = out[2] = out[3] = 0;
+    for (int i = 0; i < TUNE_N; i++) out[i] = 0;
     char id[LATENT_ID_LEN];
     int n = 0; for (; wid[n] && n < LATENT_ID_LEN - 1; n++) id[n] = (char)wid[n];
     id[n] = 0;
@@ -857,12 +877,15 @@ static bool LoadTuneFor(const wchar_t* wid, int out[4])
     FILE* f = _wfopen(g_tuningsPath, L"rb");
     if (!f) return false;
     bool found = false;
-    char line[128], lid[LATENT_ID_LEN]; int a, b, c, d;
+    char line[160], lid[LATENT_ID_LEN]; int a, b, c, d, e;
     while (fgets(line, sizeof(line), f))
     {
-        if (sscanf(line, "%19s %d %d %d %d", lid, &a, &b, &c, &d) != 5) continue;
+        e = 0;   // cycle: absent in old 4-value lines -> 0
+        int got = sscanf(line, "%19s %d %d %d %d %d", lid, &a, &b, &c, &d, &e);
+        if (got < 5) continue;                    // need at least id + 4 ints
         if (strcmp(lid, id)) continue;
-        out[0] = a; out[1] = b; out[2] = c; out[3] = d; found = true;   // later wins
+        out[0] = a; out[1] = b; out[2] = c; out[3] = d; out[4] = (got >= 6) ? e : 0;
+        found = true;                             // later wins
     }
     fclose(f);
     return found;
@@ -875,7 +898,7 @@ static void SaveTuneFor(const wchar_t* wid, const int* t)
     id[n] = 0;
     FILE* f = _wfopen(g_tuningsPath, L"ab");
     if (!f) return;
-    fprintf(f, "%s %d %d %d %d\n", id, t[0], t[1], t[2], t[3]);
+    fprintf(f, "%s %d %d %d %d %d\n", id, t[0], t[1], t[2], t[3], t[4]);
     fclose(f);
 }
 
@@ -898,17 +921,17 @@ static void ApplyCurTuneLive(void)
 static HWND g_tuneDlg  = NULL;
 static bool g_tuneSync = false;   // guard reciprocal slider<->edit updates
 
-static const int TUNE_TB[4]  = { IDC_TUNE_HUE, IDC_TUNE_SAT, IDC_TUNE_LIGHT, IDC_TUNE_CONTRAST };
-static const int TUNE_ED[4]  = { IDC_TUNE_HUEVAL, IDC_TUNE_SATVAL, IDC_TUNE_LIGHTVAL, IDC_TUNE_CONVAL };
-static const int TUNE_MIN[4] = { -180, -100, -100, -100 };
-static const int TUNE_MAX[4] = {  180,  100,  100,  100 };
+static const int TUNE_TB[TUNE_N]  = { IDC_TUNE_HUE, IDC_TUNE_SAT, IDC_TUNE_LIGHT, IDC_TUNE_CONTRAST, IDC_TUNE_CYCLE };
+static const int TUNE_ED[TUNE_N]  = { IDC_TUNE_HUEVAL, IDC_TUNE_SATVAL, IDC_TUNE_LIGHTVAL, IDC_TUNE_CONVAL, IDC_TUNE_CYCVAL };
+static const int TUNE_MIN[TUNE_N] = { -180, -100, -100, -100, -100 };
+static const int TUNE_MAX[TUNE_N] = {  180,  100,  100,  100,  100 };
 
 // Push g_curTune into an open dialog's controls (after a browse move).
 static void TuneRefreshDlg(void)
 {
     if (!g_tuneDlg) return;
     g_tuneSync = true;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < TUNE_N; i++)
     {
         SendMessageW(GetDlgItem(g_tuneDlg, TUNE_TB[i]), TBM_SETPOS, TRUE, g_curTune[i]);
         SetDlgItemInt(g_tuneDlg, TUNE_ED[i], (UINT)g_curTune[i], TRUE);
@@ -918,14 +941,14 @@ static void TuneRefreshDlg(void)
 
 static int TuneRowFromTB(HWND h, HWND dlg)
 {
-    for (int i = 0; i < 4; i++) if (h == GetDlgItem(dlg, TUNE_TB[i])) return i;
+    for (int i = 0; i < TUNE_N; i++) if (h == GetDlgItem(dlg, TUNE_TB[i])) return i;
     return -1;
 }
 
 // Apply-and-persist the four current slider values to the selected roll.
 static void TuneCommitFromDlg(HWND dlg)
 {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < TUNE_N; i++)
         g_curTune[i] = (int)SendMessageW(GetDlgItem(dlg, TUNE_TB[i]), TBM_GETPOS, 0, 0);
     ApplyCurTuneLive();
     if (g_count > 0) SaveTuneFor(g_rolls[g_sel].id, g_curTune);
@@ -940,7 +963,7 @@ static INT_PTR CALLBACK TuneColorDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM l
         INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
         InitCommonControlsEx(&icc);
         g_tuneSync = true;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < TUNE_N; i++)
         {
             HWND tb = GetDlgItem(dlg, TUNE_TB[i]);
             SendMessageW(tb, TBM_SETRANGE,   TRUE, MAKELONG(TUNE_MIN[i], TUNE_MAX[i]));
@@ -967,7 +990,7 @@ static INT_PTR CALLBACK TuneColorDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM l
     case WM_COMMAND:
         if (HIWORD(wp) == EN_CHANGE && !g_tuneSync)
         {
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < TUNE_N; i++)
                 if (LOWORD(wp) == (WORD)TUNE_ED[i])
                 {
                     BOOL ok = FALSE;
@@ -987,7 +1010,7 @@ static INT_PTR CALLBACK TuneColorDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM l
         {
         case IDC_TUNE_RESET:
             g_tuneSync = true;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < TUNE_N; i++)
             {
                 SendMessageW(GetDlgItem(dlg, TUNE_TB[i]), TBM_SETPOS, TRUE, 0);
                 SetDlgItemInt(dlg, TUNE_ED[i], 0, TRUE);
