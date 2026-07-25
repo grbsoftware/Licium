@@ -20,6 +20,16 @@
 //     the search reaches arbitrary flows and audio inside psi bends the motion.
 //     Decay widened to F(0.0, 0.992) (pure-plot..heavy-fluid ingredient). Old
 //     LX1/LX2/LX3 .milk files keep their own dressing and stay decodable-as-LXn.
+//   * LX4 -> LX5 (2026-07-25, shaper curves): NK_CURVE joins the unary block as
+//     a SOFT nonlinearity (the vocabulary had only hard floor/frac/abs, so every
+//     roll cliffed). A NK_CURVE node samples a seed-baked shaping-curve LUT
+//     (licium_curves.h). Curve seeds are SIDE-HASHES of the roll seed (never the
+//     LCG), one per slot; a preset carries them as curveN_seed= lines. Slots 0..2
+//     are tree-drawable; slot 3 is the comp color ramp (softens the fixed-scaffold
+//     cliffs). Floor policy: hard steps are rationed (excess remapped to curves)
+//     and screened (audio inside a hard step = strobe, rejected; a hard step
+//     never appears without a soft curve present). Old LX1..LX4 files stay
+//     decodable-as-LXn.
 //   * RNG: LiciumRng::Seed32(seed) (licium_rng.h — 0x9E3779B9 ^ seed*2654435761).
 //   * Draw order: (1) decay = F(0.0, 0.992); (2) the INK tree (root); (3) the
 //     PSI tree (root2). Each tree: GrowNode does ONE class draw (Next16 % 100)
@@ -45,8 +55,11 @@
 #include "../../vis_milk2/licium_rng.h"
 #include "../../vis_milk2/licium_oklab.h"
 #include "../../vis_milk2/licium_palette_lib.h"
+#include "../../vis_milk2/licium_curves.h"   // shaping-curve family (shared w/ engine)
 
-#define LX_GENVER      4
+#define LX_GENVER      5
+#define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
+                                // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
 #define LX_MAX_NODES   4096     // pool bound (depth cap keeps real trees far under this)
 #define LX_MAX_DEPTH   6        // grammar depth cap (guardrail lives in the TEMPLATE anyway)
@@ -61,16 +74,19 @@ enum NodeKind
 {
     // binary 0..6
     NK_ADD = 0, NK_SUB, NK_MUL, NK_DIV, NK_MIN, NK_MAX, NK_LT,
-    // unary 7..10
-    NK_ABS = 7, NK_FRAC, NK_FLOOR, NK_NEG,
-    // terminals 11..18
-    NK_PX = 11, NK_PY, NK_TIME, NK_BASS, NK_MID, NK_TREB, NK_FB, NK_CONST
+    // unary 7..11 (NK_CURVE is LX5's soft nonlinearity; the block stays contiguous
+    // so BiasedPick(rng, NK_ABS, 5, ...) still spans exactly the unary kinds)
+    NK_ABS = 7, NK_FRAC, NK_FLOOR, NK_NEG, NK_CURVE,
+    // terminals 12..19
+    NK_PX = 12, NK_PY, NK_TIME, NK_BASS, NK_MID, NK_TREB, NK_FB, NK_CONST
 };
 
 struct Node
 {
     int   kind;
     float cval;     // NK_CONST only
+    int   slot;     // NK_CURVE only: which curve LUT (0..2 drawable, never n->r —
+                    // DepositNode recurses r into node indices, so slot is its own field)
     int   l, r;     // pool indices, -1 = none
 };
 
@@ -87,6 +103,9 @@ struct Tree
     int  count;
     int  root;      // ink field
     int  root2;     // flow potential psi (LX4)
+    int  hardCount; // LX5: floor/frac drawn so far this build (drives rationing)
+    LiciumCurve curve[LICIUM_NUM_CURVES];  // LX5: the roll's baked shaping curves
+                                           // (0..2 sampled by nodes, 3 = comp ramp)
 };
 
 // ---- swarm mode (Gary, 2026-07-18 evening: revive the heritage doc's ACO
@@ -101,8 +120,8 @@ struct Tree
 // current grammar): regeneration = seed + the run's archived table manifest;
 // the .milk file is the artifact.
 
-#define SWARM_ROOT 19                    // parent id for the root draw
-static float g_pher[20][2][19];          // [parent kind|ROOT][child slot][child kind]
+#define SWARM_ROOT 20                    // parent id for the root draw (== kind count)
+static float g_pher[21][2][20];          // [parent kind|ROOT][child slot][child kind]
 static int   g_swarmOn = 0;
 static float g_lambda  = 0.35f;
 static int   g_seekThreads = 0;          // --seek threads: rank by filament-ness
@@ -121,7 +140,7 @@ static int BiasedPick(LiciumRng* rng, int base, int n, int parent, int slot)
     if (!g_swarmOn || mx - mn < 1e-6f)   // flat context = cold arithmetic
         return base + rng->I(0, n - 1);
 
-    unsigned int wi[19], total = 0;
+    unsigned int wi[20], total = 0;
     for (int k = 0; k < n; k++)
     {
         float v = w[base + k];
@@ -139,6 +158,16 @@ static int BiasedPick(LiciumRng* rng, int base, int n, int parent, int slot)
         r -= wi[k];
     }
     return base + n - 1;
+}
+
+// LX5: a curve slot's seed is a SIDE-HASH of the roll seed, exactly like the
+// palette/lens side-hashes — the shaping curve is fully determined by the roll,
+// but rolling one must never advance the tree's LCG. Masked to 31 bits so it
+// round-trips through the int-based curveN_seed= parse (state.cpp GetFastInt).
+static unsigned int CurveSeedOfSlot(unsigned int seed, int slot)
+{
+    unsigned int h = (seed ^ (0x43555230u + (unsigned int)slot)) * 2246822519u;  // 'CUR0'+slot
+    return h & 0x7FFFFFFFu;
 }
 
 // One class draw + one kind draw per node, always, so the stream is
@@ -159,6 +188,7 @@ static int GrowNode(LiciumRng* rng, Tree* t, int depth, int parent, int slot)
     Node* n = &t->nodes[i];
     n->l = n->r = -1;
     n->cval = 0.0f;
+    n->slot = 0;
 
     if (cls == 0)
     {
@@ -169,7 +199,20 @@ static int GrowNode(LiciumRng* rng, Tree* t, int depth, int parent, int slot)
     }
     else if (cls == 1)
     {
-        n->kind = BiasedPick(rng, NK_ABS, 4, parent, slot);
+        // Unary block is now 5 kinds (NK_CURVE joined). A directly-drawn NK_CURVE
+        // draws its slot (a conditional extra draw, like NK_CONST's cval). Floor
+        // policy (LX5): floor/frac are rationed — the first LX_HARD_QUOTA per build
+        // stay hard, and every excess one is REMAPPED to a soft curve. Remapping
+        // consumes NO extra draw (slot is derived from the node index), so the LCG
+        // stream is identical to the un-rationed grammar; only the label changes.
+        n->kind = BiasedPick(rng, NK_ABS, 5, parent, slot);
+        if (n->kind == NK_CURVE)
+            n->slot = rng->I(0, 2);
+        else if (n->kind == NK_FLOOR || n->kind == NK_FRAC)
+        {
+            if (t->hardCount >= LX_HARD_QUOTA) { n->kind = NK_CURVE; n->slot = i % 3; }
+            else t->hardCount++;
+        }
         n->l = GrowNode(rng, t, depth + 1, n->kind, 0);
         if (n->l < 0) return -1;
     }
@@ -193,6 +236,12 @@ static int BuildFromSeed(unsigned int seed, Tree* t, float* decay)
     rng.Seed32(seed);
     *decay = rng.F(0.0f, 0.992f);
     t->count = 0;
+    t->hardCount = 0;
+    // LX5: bake the roll's four shaping curves from side-hash seeds (so EvalNode
+    // can read them in the screens, and EmitPreset writes the same seeds). Slots
+    // 0..2 are tree-drawable; slot 3 is the comp color ramp.
+    for (int c = 0; c < LICIUM_NUM_CURVES; c++)
+        t->curve[c] = LiciumCurveFromSeed(CurveSeedOfSlot(seed, c));
     t->root  = GrowNode(&rng, t, 0, SWARM_ROOT, 0);
     if (t->root < 0) return 0;
     t->root2 = GrowNode(&rng, t, 0, SWARM_ROOT, 0);   // psi flow potential
@@ -393,6 +442,7 @@ static float EvalNode(const Tree* tr, int i, const EvalCtx* c)
     case NK_FRAC: { float a = EvalNode(tr, n->l, c); return a - floorf(a); }
     case NK_FLOOR:return floorf(EvalNode(tr, n->l, c));
     case NK_NEG:  return -EvalNode(tr, n->l, c);
+    case NK_CURVE:return LiciumCurveEval(tr->curve[n->slot], EvalNode(tr, n->l, c));
     case NK_PX:   return c->px;
     case NK_PY:   return c->py;
     case NK_TIME: return c->t;
@@ -420,6 +470,15 @@ static int TreeUses(const Tree* t, int kindLo, int kindHi)
 {
     for (int i = 0; i < t->count; i++)
         if (t->nodes[i].kind >= kindLo && t->nodes[i].kind <= kindHi) return 1;
+    return 0;
+}
+
+// LX5: does any node sample curve slot `s`? (slot 3 = comp ramp is never a node
+// slot, so it's driven separately in EmitPreset.)
+static int TreeUsesCurveSlot(const Tree* t, int s)
+{
+    for (int i = 0; i < t->count; i++)
+        if (t->nodes[i].kind == NK_CURVE && t->nodes[i].slot == s) return 1;
     return 0;
 }
 
@@ -507,6 +566,19 @@ static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* r
 
     // 2. Structural must: the INK field uses position (else a flat wash).
     if (!SubtreeUses(t, t->root, NK_PX, NK_PY)) return 0;
+
+    // 2b. LX5 floor policy (structural, cheap, both trees share the pool):
+    //   - AUDIO INSIDE A HARD STEP IS THE STROBE. floor(...-bass_att) snaps the
+    //     whole field across an integer boundary on the beat = the blinding
+    //     full-field flash. Reject any floor/frac whose subtree pulls in audio.
+    //     (Spatial-arg floors = stripes, fine; audio-arg floors = strobe, out.)
+    //   - NEVER ALONE. A hard step with no soft curve anywhere is an un-eased
+    //     cliff; rationing already injects curves past the quota, so this only
+    //     culls the rare lone-floor tree.
+    for (int i = 0; i < t->count; i++)
+        if (t->nodes[i].kind == NK_FLOOR || t->nodes[i].kind == NK_FRAC)
+            if (SubtreeUses(t, t->nodes[i].l, NK_BASS, NK_TREB)) return 0;
+    if (TreeUses(t, NK_FRAC, NK_FLOOR) && !TreeUses(t, NK_CURVE, NK_CURVE)) return 0;
 
     // 3. The flow screen (LX4 rung 2 — this is the new must-dance). psi must
     //    produce a REAL flow (nonzero curl somewhere) that AUDIO actually bends.
@@ -689,6 +761,12 @@ static void EmitExpr(const Tree* t, int i, Str* s)
     case NK_FRAC:s->Raw("frac("); EmitExpr(t, n->l, s); s->Raw(")"); break;
     case NK_FLOOR:s->Raw("floor("); EmitExpr(t, n->l, s); s->Raw(")"); break;
     case NK_NEG: s->Raw("(-"); EmitExpr(t, n->l, s); s->Raw(")"); break;
+    case NK_CURVE:
+        // CurveN() clamps its input (CurveUV saturates), matching LiciumCurveEval,
+        // so the unbounded child expression is safe to feed raw.
+        _snprintf(tmp, sizeof(tmp) - 1, "Curve%d(", n->slot); tmp[sizeof(tmp) - 1] = 0;
+        s->Raw(tmp); EmitExpr(t, n->l, s); s->Raw(")");
+        break;
     case NK_PX:  s->Raw(g_posVar); s->Raw(".x"); break;
     case NK_PY:  s->Raw(g_posVar); s->Raw(".y"); break;
     case NK_TIME:s->Raw("tt"); break;
@@ -807,6 +885,18 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
     out->Add("warp=0.00000");
     out->Add("buf0_iterations=1");
 
+    // LX5 shaping-curve seeds. Slots 0..2 are written only if the tree samples
+    // them (0 = unused -> the engine bakes identity, so a stray Curve is a no-op);
+    // slot 3 is the comp color ramp and is always dressed. Seeds are already
+    // 31-bit (CurveSeedOfSlot masks), matching the int-based curveN_seed= parse.
+    for (int cs = 0; cs < LICIUM_NUM_CURVES; cs++)
+    {
+        unsigned int cseed = 0;
+        if (cs == 3)                        cseed = CurveSeedOfSlot(seed, 3);
+        else if (TreeUsesCurveSlot(t, cs))  cseed = CurveSeedOfSlot(seed, cs);
+        out->Add("curve%d_seed=%u", cs, cseed);
+    }
+
     // --- buf0: EVOLVED medium, evolved ink (LX4 rung 2) ----------------------
     // The template is the guardrail (decay, injection, clamp, velocity cap) but
     // the MOTION is no longer a fixed swirl: velocity = curl of an evolved flow
@@ -889,17 +979,21 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         body.Raw("float3 nrm = normalize(float3(-lx*3.5, -ly*3.5, 1.0));\n");
         body.Raw("float3 lgt = normalize(float3(cos(time*0.23), sin(time*0.19), 0.55 + 0.45*mid_att));\n");
         body.Raw("float sheen = pow(saturate(dot(nrm, lgt)), 2.5);\n");
-        body.Raw("float dens = saturate(dot(c, lw) * 3.0);\n");
+        // LX5: the density response is shaped by the rolled comp-ramp curve (slot
+        // 3) instead of a fixed saturate(), and the three stop weights are
+        // smoothstep (C1) instead of saturate() (the old hard-clamp cliffs). With
+        // curve3_seed==identity this reduces to a softened version of the old ramp.
+        body.Raw("float dens = Curve3(saturate(dot(c, lw) * 3.0));\n");
         _snprintf(l, sizeof(l) - 1,
-            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), saturate(dens*3.0));\n",
+            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), smoothstep(0.0, 0.34, dens));\n",
             deep[0], deep[1], deep[2], s1[0], s1[1], s1[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
-            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(dens*3.0 - 1.0));\n",
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), smoothstep(0.33, 0.67, dens));\n",
             s2[0], s2[1], s2[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
-            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(dens*3.0 - 2.0));\n",
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), smoothstep(0.66, 1.0, dens));\n",
             accent[0], accent[1], accent[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
@@ -917,8 +1011,9 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
 static void PrintChain(const Tree* t, int i)
 {
     const Node* n = &t->nodes[i];
-    if (n->kind == NK_CONST) printf("%d(%.1f) ", n->kind, n->cval);
-    else                     printf("%d ", n->kind);
+    if      (n->kind == NK_CONST) printf("%d(%.1f) ", n->kind, n->cval);
+    else if (n->kind == NK_CURVE) printf("%d[c%d] ", n->kind, n->slot);
+    else                          printf("%d ", n->kind);
     if (n->l >= 0) PrintChain(t, n->l);
     if (n->r >= 0) PrintChain(t, n->r);
 }
