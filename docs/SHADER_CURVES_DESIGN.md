@@ -1,8 +1,9 @@
 # Shader curves + LUT facility + families
 
 *Status: **Steps 1-3 SHIPPED** (LUT facility 22511d5; vocab + floor policy
-762c95e, genver LX5). Steps 4 (families + explore/exploit dial) and 5 (generalize
-the LUT to palette-ramps / the audio layer) remain — still design-only below.
+762c95e, genver LX5). **Step 4 (Families) DESIGN RESET 2026-07-25** to a separate
+`LXF` trunk (+1 graft, NO genver bump) — see the Families section below; the old
+compound-token/dial design is dead. Step 5 (generalize the LUT) deferred.
 Worked out live with Gary 2026-07-24, built 2026-07-25. Cross-refs:
 [[milkdrop-latent-search]], `AUDIO_TEXTURE_DESIGN.md` (shares the LUT facility),
 `LATENT_GROWTH_DESIGN.md` (promotion), `SHADER_BEHAVIOR_RESEARCH.md` (vocabulary
@@ -94,56 +95,122 @@ slot in later. Do NOT over-abstract before the first client works.
 (= the cockpit's gradient-steepness knob, but rolled), movement, and the
 audio->effect mapping. One curve vocabulary, used everywhere a signal is shaped.
 
-## Cold-forever + promotion (families)
+## Step 4 — Families as a SEPARATE TRUNK (the +1 graft)
 
-Gary re-confirmed **cold prospector forever** — no directed search, no
-pheromone. Promotion works WITHOUT warming the search:
+**Direction reset 2026-07-25 (Gary + Opus 5, built by 4.8).** The earlier
+"compound token in the cold alphabet + genver bump + capped guest share +
+explore/exploit dial" design is DEAD. Gary's correction: *we keep cold-rolling
+the same swarm/cold volume, and a family is a NEW TREE we grow off the forks each
+time — brute-forcing every +1 possibility. One tree of even 100 branches is
+almost nothing on top of 200-300k cold results.* So a family does NOT live inside
+cold rolls; it rides ALONGSIDE the cold scan as its own lineage.
 
-- **Curves are silent.** No per-curve vote. A liked *shader* credits the curves
-  (and combinations) inside it — matches the standing law "votes dictate what
-  flows to Bandit; mine -> name -> promote into ingredient tables."
-- **A family = a promoted winning COMBINATION = a compound/macro token.** The
-  generator's vocabulary is atomic today (one primitive per token). A family is
-  a whole winning subtree promoted intact, drawn as a single token that expands
-  to a **longer string** -> rolls that draw it start **more developed**, from an
-  earned chunk instead of from atoms. (Genetic programming calls these
-  "automatically defined functions.") The search stays EXACTLY as cold: you
-  enrich the ALPHABET, you do not steer the walk. A seed still reproduces a roll
-  byte-for-byte; the family expands deterministically.
-- **Extraction — decide for v1:** promote the liked shader's *whole tree* (or its
-  couple of characteristic subtrees) as a family — pragmatic given ~40
-  votes/session is too thin for statistics. Later: *mine recurring subtrees*
-  across many likes (the growth doc's `--mine` tooling) once there's signal.
-- **Gating (swirl clause):** families + library curves are capped-share GUESTS —
-  they enrich, never dominate. Even at full exploit, cap the earned share or a
-  few beloved curves eat all diversity.
-- **Explore<->exploit dial:** one scalar = P(draw from earned library/families vs
-  fresh random seed). Fits the Bandit name. Its DEFAULT drifts explore->exploit
-  as the library matures, so the public build ships "doped with an earned
-  starter vocabulary" (the long game Gary already stated).
+**Consequence: no genver bump.** The cold grammar is untouched, so LX5 seeds
+decode identically, existing screens stay calibrated, and the LX5 haul stays
+valid. "Capped share" and the "explore/exploit dial" dissolve — families never
+compete for slots inside cold rolls; the only knob is how many family rolls you
+emit next to the cold haul.
 
-## Build order for the next session (proposed)
+### The +1 graft operator
 
-1. **LUT facility first** — bake-from-seed + cache-by-id + bind to one
-   `sampler_curve0`, with a single hardcoded test curve. Prove a shader can read
-   it live. (Cloning the buffer-sampler plumbing.)
-2. **Shaping-curve vocab** — the parametric family (sharpness + tension) ->
-   256-LUT; a `NK_CURVE` slot the emitter references; the prospector rolls curve-
-   seeds. Also roll the **comp ramp softness** (kills the fixed-scaffold cliffs).
-3. **The floor policy** — soft curves in the vocab; `floor`/`frac` rationed +
-   never alone (co-occurrence screen); **ban audio inside a hard step** (spatial-
-   arg floors = stripes OK; audio-arg floors = strobe, reject). One genver bump;
-   screens recalibrate on first scan.
-4. **Families** — extract from liked shaders -> compound macro tokens in the
-   cold vocab; capped guest share; the explore/exploit dial.
-5. Generalize the LUT facility to palette-ramps / the audio layer (second
-   client).
+Given a liked (winning) tree, at EVERY node site — spanning both roots (ink +
+psi) — graft exactly one node, keeping the existing subtree `T`:
 
-## Open decisions to confirm before coding
+- **Unary wrap:** `T -> u(T)`, `u in {abs, frac, floor, neg, curve@slot0,
+  curve@slot1, curve@slot2}` = **7**.
+- **Binary wrap:** `T -> b(T, term)` or `b(term, T)`, `b in` the 7 binaries,
+  `term in` the 8 terminals, both orderings minus commutative dupes (add/mul/
+  min/max are order-free; sub/div/lt are not) ~= **90**.
 
-- Curve-slot budget per preset (the `buf0..3` question, for curves) — a handful?
-- Family extraction: whole-liked-tree (v1) vs subtree-mining (later) — leaning v1.
-- LUT cache: in-memory recompute-per-launch (default) vs persist-to-disk.
+~100 grafts per site. A 40-node winner -> ~4,000 children = **~1.3% on top of a
+300k cold scan** (Gary's "almost nothing" is exactly right). Leaf expansion needs
+no separate operator — a binary wrap on a leaf *is* leaf expansion. `NK_CONST`
+on the terminal side draws from a small fixed const ladder (kept in the frozen
+enumeration contract).
 
-White-room-safe throughout: LUTs, GP macros, parametric easings, spectral
-analysis are all standard public techniques.
+### Identity = the enumeration index (no RNG for the family pass)
+
+~4,000 children per family is small enough to enumerate EXHAUSTIVELY. No
+sampling, no seed. The enumeration index IS the identity:
+`id = (family_idx << 16) | graft_idx`, lineage **`LXF<cold_genver>-XXXXXXXX`**
+(`LXF5-` while cold is LX5, so family rolls surface WITH the fresh gen-5 group in
+X, not at the bottom). Fully decodable, byte-reproducible. Two disciplines buy
+this:
+
+- **`latent_families.txt` is append-only, never reordered** — a family's index is
+  permanent (same law as the later-wins sidecars). It is part of the reproduction
+  contract, like the swarm-table manifest.
+- **The enumeration order is a frozen CONTRACT** (like the `NodeKind` enum block).
+  Changing the operator set later bumps a *family* version, not the cold genver.
+
+### What a frozen family record stores
+
+To reproduce genver-independently, each record freezes: origin roll id + origin
+seed + decay + the 3 curve seeds + the serialized node arrays for both roots.
+Curves/palette for a family child re-derive from the stored origin seed (so the
+child keeps the winner's curves); a `curve@slot` graft reuses one of the three.
+The frozen node array means a later cold-genver bump can NEVER silently rebuild a
+promoted family into a different tree.
+
+### Which children to emit (the non-obvious call)
+
+Family children start from an already-passing tree, so their screen pass-rate is
+FAR above cold 0.9% — expect maybe half of ~4,000 to survive, ~2,000 passers for
+~40 emit slots. **Stratify by graft SITE, round-robin** — you want "what happens
+if I add something *here*" across all the different heres, not 40 variants at one
+fork. Maximum information per grading session, still deterministic.
+
+`LX_MAX_SIZE 48` / `LX_MAX_DEPTH 6` will bite: promote a 46-node winner and most
+grafts screen out. Family search works best on small-to-mid winners — expected,
+not a bug.
+
+### Pipeline (four small pieces)
+
+1. **`f` hotkey in X** appends the roll id to a pending-promotion sidecar
+   (`latent_promote.txt`, near-copy of the `e` error hotkey). `f` again un-queues.
+2. **`--promote`** rebuilds each pending tree from its seed under the CURRENT
+   grammar, serializes it, appends to `latent_families.txt`. **TRAP:** must run
+   while the roll's genver still matches `LX_GENVER` — the prospector can only
+   rebuild a tree from a seed under the grammar that made it. Materialize + freeze
+   at promotion time; the frozen text is genver-independent forever after.
+   Promote lazily across a genver bump and the ids silently rebuild differently.
+3. **Family pass** rides the normal scan (one command, cold budget unchanged,
+   its OWN emit cap so families don't crowd the cold haul).
+4. Triage + X as normal. Liked children get promoted again -> round 2.
+
+**TRAP (parser):** `LatParseId` reads `LX`, then `S`, then digits. `F` is
+neither, so `LXF5-...` parses gen = -1 and every family roll sinks to the bottom
+of X (the exact bug class that buried the LX5 haul under LXS4). Teach the parser
+`F` as a trunk marker in the same commit.
+
+### The clean framing
+
+Your votes are the selection function, `+1` is the mutation, rounds are depth: a
+human-in-the-loop beam search, beam width = how many you promote. No
+combinatorial explosion because YOU are the filter. Honest caveat: this DEEPENS
+around winners, it does not WIDEN — the "same behaviors everywhere" ceiling is
+scaffold-level (fixed swirl geometry) and neither cold nor family search touches
+it (that's rung 2/3). Expect better versions of things you already liked; do not
+read a flat result as the family mechanism failing.
+
+## Step 5 — generalize the LUT (deferred)
+
+Deferred to a later run (Gary, 2026-07-25): the second-client refactor
+(palette-ramps / the audio layer ride the same bake/cache/bind facility). Build
+Families first; step 5 is architecture with less immediate payoff. A palette IS a
+color ramp IS a 1-D LUT; the audio-texture layer (`AUDIO_TEXTURE_DESIGN.md`) is a
+data texture — same primitive (bake data, cache, bind, read). Do NOT over-abstract
+before that second client is real.
+
+## Build order (Families)
+
+1. **Design doc** (this rewrite).
+2. **Engine/X:** `f` promote hotkey + `LatParseId` `F`-trunk + `RollCompare`
+   trunk generalization + legend/glyph. Rebuild.
+3. **Prospector `--promote`:** rebuild+serialize+freeze liked trees to
+   `latent_families.txt` (genver guard).
+4. **Prospector family pass:** enumerate +1 grafts, screen, stratify-by-site
+   emit as `LXF<gen>-` rolls (own emit cap).
+
+White-room-safe throughout: GP grafting / ADFs, exhaustive enumeration,
+parametric easings, spectral analysis are all standard public techniques.
