@@ -1,11 +1,24 @@
-# Shader curves + LUT facility + families (DRAFT — next-session build)
+# Shader curves + LUT facility + families
 
-*Status: **DRAFT — talk-only design, no code yet.** Worked out live with Gary
-2026-07-24 (the same session that shipped the Tune-cockpit Color slice). Gary's
-rule this session: capture it, code it in a NEW session. This doc is the runbook
-so the coding session starts warm. Cross-refs: [[milkdrop-latent-search]],
-`AUDIO_TEXTURE_DESIGN.md` (shares the LUT facility), `LATENT_GROWTH_DESIGN.md`
-(promotion), `SHADER_BEHAVIOR_RESEARCH.md` (vocabulary roadmap).*
+*Status: **Steps 1-3 SHIPPED** (LUT facility 22511d5; vocab + floor policy
+762c95e, genver LX5). Steps 4 (families + explore/exploit dial) and 5 (generalize
+the LUT to palette-ramps / the audio layer) remain — still design-only below.
+Worked out live with Gary 2026-07-24, built 2026-07-25. Cross-refs:
+[[milkdrop-latent-search]], `AUDIO_TEXTURE_DESIGN.md` (shares the LUT facility),
+`LATENT_GROWTH_DESIGN.md` (promotion), `SHADER_BEHAVIOR_RESEARCH.md` (vocabulary
+roadmap).*
+
+*Build notes (2026-07-25): NK_CURVE is a unary kind sampling a seed-baked LUT;
+curve seeds are side-hashes of the roll seed (CurveSeedOfSlot, 'CUR0'+slot,
+31-bit) so trees stay seed-pure. Slots 0..2 tree-drawable, slot 3 = comp ramp
+(Curve3 + smoothstep replace the fixed saturate cliffs; the additive sheen was
+deliberately left alone pending a separate blowout diagnosis). Floor policy:
+LX_HARD_QUOTA=1 hard step per build (excess remaps to soft curves, no extra
+draw); screens reject audio-inside-a-hard-step and a hard-step-with-no-curve.
+Verified: --selftest byte-identical, 3 rolls render clean in-engine (soft
+gradients, no strobe), recorded scan [32.66M,33.66M) 0.895% pass, 40 emitted.
+Open finding: curves don't fix the flat "bloom or go dark" ceiling — that's the
+growth-ladder / families work, not this milestone.*
 
 ## Why (the diagnosis that started it)
 
