@@ -99,6 +99,7 @@ struct LatentRoll
     unsigned char tags[LATENT_NTAGS];
     int           hasNote;
     int           error;               // flagged broken (e); copied to latent_errors dir
+    int           promote;             // queued for family promotion (f); --promote reads it
 };
 
 static LatentRoll* g_rolls = NULL;
@@ -264,6 +265,26 @@ static void LoadErrors(void)
     fclose(f);
 }
 
+// Family-promotion queue (f): reversible, later-wins, like the error flags. A
+// "<id> <0|1>" line; tools\latent_prospect --promote reads the current set,
+// rebuilds each roll's tree from its seed, and freezes it into latent_families.txt.
+static void LoadPromote(void)
+{
+    wchar_t path[MAX_PATH];
+    swprintf(path, L"%slatent_promote.txt", g_plugin.m_szMilkdrop2Path);
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+    char idA[LATENT_ID_LEN]; int v;
+    char line[128];
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%19s %d", idA, &v) == 2)
+        {
+            LatentRoll* r = FindRollA(idA);
+            if (r) r->promote = (v ? 1 : 0);   // later lines win
+        }
+    fclose(f);
+}
+
 // Mark rolls that have a description; optionally fetch the latest text for one
 // id (later-wins) so re-describing starts from the existing words.
 static void LoadNotes(const wchar_t* fetchId, wchar_t* fetchOut /*LATENT_NOTE_LEN*/)
@@ -309,14 +330,18 @@ static int RollGroup(const LatentRoll* r)
 static const wchar_t* SECTION_LABEL[3] =
     { L"- to vote -", L"- liked -", L"- passed (no's) -" };
 
-// Parse "LX<gen>-<seed>" / "LXS<gen>-<seed>" into (generation, swarm?, seed).
-// gen = -1 for anything that doesn't parse, so foreign ids sort last.
+// Parse "LX<gen>-<seed>" / "LXS<gen>-<seed>" / "LXF<gen>-<packed>" into
+// (generation, trunk, seed). trunk: 0 cold, 1 swarm (S), 2 family (F). gen = -1
+// for anything that doesn't parse, so foreign ids sort last. NOTE: the F marker
+// MUST be handled here or family rolls parse gen=-1 and sink under every cold
+// haul (the exact bug that once buried LX5 under LXS4).
 static void LatParseId(const wchar_t* id, int* gen, int* swarm, unsigned int* seed)
 {
     *gen = -1; *swarm = 0; *seed = 0;
     if (id[0] != L'L' || id[1] != L'X') return;
     const wchar_t* p = id + 2;
-    if (*p == L'S') { *swarm = 1; p++; }
+    if      (*p == L'S') { *swarm = 1; p++; }   // swarm trunk (LXS)
+    else if (*p == L'F') { *swarm = 2; p++; }   // family trunk (LXF)
     int g = 0, any = 0;
     while (*p >= L'0' && *p <= L'9') { g = g * 10 + (*p - L'0'); p++; any = 1; }
     if (!any) return;
@@ -342,7 +367,7 @@ static int __cdecl RollCompare(const void* a, const void* b)
     LatParseId(ra->id, &gena, &swa, &sa);
     LatParseId(rb->id, &genb, &swb, &sb);
     if (gena != genb) return genb - gena;              // higher generation first
-    if (swa  != swb ) return swa - swb;                // cold (0) before swarm (1)
+    if (swa  != swb ) return swa - swb;                // cold(0), swarm(1), family(2)
     if (sa   != sb  ) return (sa < sb) ? 1 : -1;       // higher seed first
     return wcscmp(rb->id, ra->id);                     // stable fallback
 }
@@ -481,6 +506,17 @@ static void ToggleError(LatentRoll* r)
     else          DeleteFileW(dst);                 // un-flag removes the stash
 }
 
+// Family-promotion toggle (f): queue this roll to seed a new LXF trunk. Unlike
+// the error flag there is no file to copy - the prospector rebuilds the tree
+// from the seed at --promote time, so all we persist is the reversible sidecar.
+static void TogglePromote(LatentRoll* r)
+{
+    r->promote ^= 1;
+    char line[64];
+    sprintf(line, "%S %d\r\n", r->id, r->promote);
+    AppendLineA(L"latent_promote.txt", line);
+}
+
 static void SaveNote(LatentRoll* r, const wchar_t* text)
 {
     if (!text[0]) return;               // empty accept = no line (cancel-like)
@@ -523,6 +559,7 @@ extern "C" void LatentBrowserOpen(void)
     LoadVotes();
     LoadTags();
     LoadErrors();
+    LoadPromote();
     LoadNotes(NULL, NULL);
     if (g_count > 1)
         qsort(g_rolls, g_count, sizeof(LatentRoll), RollCompare);
@@ -1228,6 +1265,9 @@ extern "C" int LatentBrowserHandleChar(int ch)
         case 'e': case 'E':
             ToggleError(&g_rolls[g_sel]);
             return 1;
+        case 'f': case 'F':
+            TogglePromote(&g_rolls[g_sel]);
+            return 1;
         case 'p': case 'P':
             CyclePalette();
             return 1;
@@ -1420,19 +1460,20 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         int line    = h / 30;
         if (line < fh + fh / 4) line = fh + fh / 4;
         if (line < 15) line = 15;
-        int headerH = line * 6 + line / 2;
+        int headerH = line * 7 + line / 2;
         int rowH    = line + 2;
         const int x0 = 10;
 
         wchar_t buf[160];
-        int nVote = 0, nLike = 0, nNo = 0, nErr = 0;
+        int nVote = 0, nLike = 0, nNo = 0, nErr = 0, nProm = 0;
         for (int i = 0; i < g_count; i++)
         {
             int g = RollGroup(&g_rolls[i]);
             if      (g == 0) nVote++;
             else if (g == 1) nLike++;
             else             nNo++;
-            if (g_rolls[i].error) nErr++;
+            if (g_rolls[i].error)   nErr++;
+            if (g_rolls[i].promote) nProm++;
         }
 
         // Tag-name legend line, built from TAG_NAMES so it never drifts (Gary
@@ -1445,13 +1486,19 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 off += swprintf(tagLegend + off, L" %d%.3S", t + 1, TAG_NAMES[t]);
         }
 
-        swprintf(buf, L"%d liked \x00b7 %d no \x00b7 %d err", nLike, nNo, nErr);
+        // e = flag broken (copied to latent_errors\), f = queue for family
+        // promotion (--promote reads latent_promote.txt). Counts ride this line.
+        wchar_t annLine[96];
+        swprintf(annLine, L"e err %d   f fam %d", nErr, nProm);
+
+        swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
 
         int maxw = LatTextW(buf);
         {
             int t;
-            if ((t = LatTextW(L"Y like  N pass  U clr  e err")) > maxw) maxw = t;
-            if ((t = LatTextW(L"1-6 tag  D descr  c color  / find")) > maxw) maxw = t;
+            if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > maxw) maxw = t;
+            if ((t = LatTextW(annLine))                        > maxw) maxw = t;
+            if ((t = LatTextW(L"1-6 tag  D descr  c color"))    > maxw) maxw = t;
             if ((t = LatTextW(tagLegend))                      > maxw) maxw = t;
             if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
             if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > maxw) maxw = t;
@@ -1488,18 +1535,19 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                     g_filter[0] ? 0xFFFFD070
                                 : (g_palCycle > 0) ? 0xFF70C0FF
                                 : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
-            swprintf(buf, L"%d liked \x00b7 %d no \x00b7 %d err", nLike, nNo, nErr);
-            LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2,
-                    nErr ? 0xFFCC8877 : 0xFF9999AA);
-            LatText(L"Y like  N pass  U clr  e err",
+            swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
+            LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
+            LatText(L"Y like  N pass  U clr  / find",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
-            LatText(L"1-6 tag  D descr  c color  / find",
-                    x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
-            LatText(tagLegend,
+            LatText(annLine, x0, line / 2 + line * 3, x1, line / 2 + line * 4,
+                    (nErr || nProm) ? 0xFFCC8877 : 0xFF9999AA);
+            LatText(L"1-6 tag  D descr  c color",
                     x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
+            LatText(tagLegend,
+                    x0, line / 2 + line * 5, x1, line / 2 + line * 6, 0xFF9999AA);
             LatText(g_hideVoted ? L"p pal  h show all  X close"
                                 : L"p pal  h hide voted  X close",
-                    x0, line / 2 + line * 5, x1, line / 2 + line * 6, 0xFF9999AA);
+                    x0, line / 2 + line * 6, x1, line / 2 + line * 7, 0xFF9999AA);
         }
 
         if (g_count == 0)
@@ -1570,10 +1618,11 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 tags[nt] = 0;
 
                 wchar_t buf[96];
-                swprintf(buf, L"%s %s%s%s%s%s", r->id, VerdictShort(r->verdict),
+                swprintf(buf, L"%s %s%s%s%s%s%s", r->id, VerdictShort(r->verdict),
                          nt ? L" #" : L"", tags,
                          r->hasNote ? L" *" : L"",
-                         r->error ? L" E" : L"");
+                         r->error ? L" E" : L"",
+                         r->promote ? L" F" : L"");
 
                 DWORD col;
                 int rk = VerdictRank(r->verdict);
