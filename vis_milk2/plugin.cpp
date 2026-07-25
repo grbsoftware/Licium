@@ -1102,6 +1102,11 @@ void CPlugin::MyPreInitialize()
         m_nPassBufReadIdx[i]= 0;
     }
     m_bPassBufClearPending  = true;
+    for (i=0; i<LICIUM_NUM_CURVES; i++)
+    {
+        m_lpCurveLut[i]     = NULL;
+        m_nCurveLutSeed[i]  = 0;
+    }
     m_lpDDSTitle			= NULL;
     m_nTitleTexSizeX        = 0;
     m_nTitleTexSizeY        = 0;
@@ -2040,6 +2045,10 @@ int CPlugin::AllocateMyDX9Stuff()
         // are already registered in m_textures[] when preset shaders get their
         // params cached - that's what makes texsize_buf0..3 resolve.
         PassBuffers_Ensure();
+
+        // same reason: "curve0".."curve3" must already be registered in
+        // m_textures[] before any preset shader has its params cached.
+        CurveLuts_Ensure();
     }
 
 
@@ -3484,6 +3493,12 @@ void CPlugin::RecompileBufferShaders(CState* pState)
     }
 
     m_bPassBufClearPending = true;  // every applied preset starts from black buffers
+
+    // Curve LUTs ride the same path for the same reason: this is the one place
+    // that runs for EVERY applied preset (hard cut, blend completion, mash-up,
+    // and the device-reset reload), so a preset can never render against the
+    // previous preset's curves.
+    CurveLuts_Update(pState);
 }
 
 void CPlugin::PassBuffers_Ensure()
@@ -3609,9 +3624,127 @@ void CPlugin::PassBuffers_Release()
 }
 
 //----------------------------------------------------------------------
+// Licium shaping-curve LUTs
+//----------------------------------------------------------------------
+
+void CPlugin::CurveLuts_Ensure()
+{
+    LPDIRECT3DDEVICE9 lpDevice = GetDevice();
+    if (!lpDevice)
+        return;
+
+    for (int n=0; n<LICIUM_NUM_CURVES; n++)
+    {
+        if (m_lpCurveLut[n])
+            continue;
+
+        // 256x1 (LICIUM_CURVE_LUT_W x 1), created through explicit w/h rather
+        // than a hardcoded 1-D shape: a later morph-axis curve family is a 2-D
+        // table (rows = curves, second coordinate selects between them), and it
+        // should slot in here without disturbing the binding path.
+        int w = LICIUM_CURVE_LUT_W;
+        int h = 1;
+
+        // MANAGED, not DEFAULT: these are CPU-filled data tables, never render
+        // targets, so the runtime keeps its own copy and a device reset restores
+        // them for free - no reset handling anywhere.
+        if (lpDevice->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_lpCurveLut[n], NULL) != D3D_OK)
+        {
+            // out of memory: run without this slot. Its sampler binds nothing,
+            // so a shader referencing it reads black - i.e. the curve flattens
+            // to zero rather than the preset failing to load.
+            m_lpCurveLut[n] = NULL;
+            continue;
+        }
+
+        m_nCurveLutSeed[n] = 0;     // nothing baked yet
+
+        // Register under "curveN" so that (a) cleanup releases it with the rest,
+        // and (b) sampler_curveN + texsize_curveN resolve through the pristine
+        // by-name lookup in CShaderParams::CacheParams - no engine special case.
+        // Shaders should spell it sampler_fc_curveN for linear+clamp.
+        TexInfo x;
+        swprintf(x.texname, L"curve%d", n);
+        x.texptr        = m_lpCurveLut[n];
+        x.w             = w;
+        x.h             = h;
+        x.d             = 1;
+        x.bEvictable    = false;
+        x.nAge          = m_nPresetsLoadedTotal;
+        x.nSizeInBytes  = 0;
+        m_textures.push_back(x);
+    }
+}
+
+void CPlugin::CurveLuts_Update(CState* pState)
+{
+    if (!pState)
+        return;
+
+    CurveLuts_Ensure();     // no-op once allocated
+
+    for (int n=0; n<LICIUM_NUM_CURVES; n++)
+    {
+        unsigned int seed = pState->m_nCurveSeed[n];
+
+        // The cache: a curve is fully determined by its seed, so an unchanged
+        // seed means the table already in the texture is already correct. Most
+        // preset changes leave most slots alone, and a re-bake is ~256 tanh
+        // evaluations, so this is cheap either way - it just keeps the common
+        // case at zero cost.
+        if (!m_lpCurveLut[n] || seed == m_nCurveLutSeed[n])
+            continue;
+
+        float table[LICIUM_CURVE_LUT_W];
+        if (seed)
+        {
+            LiciumCurveBakeSeed(seed, table);
+        }
+        else
+        {
+            // Unused slot: bake the identity so a shader that samples a curve
+            // the preset never declared passes its signal through unchanged.
+            // Black would silently zero the signal and read as a broken preset.
+            const float inv = 1.0f / (float)(LICIUM_CURVE_LUT_W - 1);
+            for (int i=0; i<LICIUM_CURVE_LUT_W; i++)
+                table[i] = (float)i * inv;
+        }
+
+        D3DLOCKED_RECT lr;
+        if (m_lpCurveLut[n]->LockRect(0, &lr, NULL, 0) != D3D_OK)
+            continue;
+
+        unsigned int* pRow = (unsigned int*)lr.pBits;
+        for (int i=0; i<LICIUM_CURVE_LUT_W; i++)
+        {
+            int v = (int)(table[i] * 255.0f + 0.5f);
+            if (v < 0)   v = 0;
+            if (v > 255) v = 255;
+            // Replicated across RGB so the shader can read .x, .r or .rgb and
+            // get the same number however the emitter happens to spell it.
+            pRow[i] = D3DCOLOR_ARGB(255, v, v, v);
+        }
+
+        m_lpCurveLut[n]->UnlockRect(0);
+        m_nCurveLutSeed[n] = seed;
+    }
+}
+
+void CPlugin::CurveLuts_Release()
+{
+    // like m_lpBlur / the pass buffers: CleanUpMyDX9Stuff already released the
+    // textures via the m_textures[] sweep, so only null the pointers here.
+    for (int n=0; n<LICIUM_NUM_CURVES; n++)
+    {
+        m_lpCurveLut[n]  = NULL;
+        m_nCurveLutSeed[n] = 0;
+    }
+}
+
+//----------------------------------------------------------------------
 
 /*
-bool CPlugin::LoadShaderFromFile( char* szFile, char* szFn, char* szProfile, 
+bool CPlugin::LoadShaderFromFile( char* szFile, char* szFn, char* szProfile,
                                   LPD3DXCONSTANTTABLE* ppConstTable, void** ppShader )
 {
     LPD3DXBUFFER pShaderByteCode;
@@ -4000,6 +4133,9 @@ void CPlugin::CleanUpMyDX9Stuff(int final_cleanup)
 
     // ditto for the multi-pass buffers (they're in m_textures[] too)
     PassBuffers_Release();
+
+    // ...and the curve LUTs
+    CurveLuts_Release();
 
     // NOTE: not necessary; shell does this for us.
     /*if (GetDevice())

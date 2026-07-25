@@ -228,6 +228,8 @@ CState::CState()
         m_szBufShadersText[b][0] = 0;
         m_nBufIters[b] = 1;
     }
+    for (int c=0; c<LICIUM_NUM_CURVES; c++)
+        m_nCurveSeed[c] = 0;
 
 	// this is the list of variables that can be used for a PER-FRAME calculation;
 	// it is a SUBSET of the per-vertex calculation variable list.
@@ -711,6 +713,9 @@ void CState::Default(DWORD ApplyFlags)
             m_szBufShadersText[b][0] = 0;
             m_nBufIters[b] = 1;
         }
+        // ...and so do the curve seeds the shaders sample
+        for (int c=0; c<LICIUM_NUM_CURVES; c++)
+            m_nCurveSeed[c] = 0;
     }
 
     RandomizePresetVars();
@@ -1009,6 +1014,11 @@ bool CState::Export(const wchar_t *szIniFile)
             sprintf(bufprefix, "buf%d_", b);
             WriteCode(fOut, i, m_szBufShadersText[b], bufprefix, true);
         }
+
+    // shaping-curve seeds (the LUTs the shaders sample); 0 = slot unused
+    for (int c=0; c<LICIUM_NUM_CURVES; c++)
+        if (m_nCurveSeed[c])
+            fprintf(fOut, "curve%d_seed=%u\n", c, m_nCurveSeed[c]);
 
 	fclose(fOut);
 
@@ -1483,6 +1493,16 @@ bool CState::Import(const wchar_t *szIniFile, float fTime, CState* pOldState, DW
             ReadCode(f, m_szBufShadersText[b], bufprefix);
             sprintf(bufprefix, "buf%d_iterations", b);
             m_nBufIters[b] = GetFastInt(bufprefix, 1, f);
+        }
+
+        // shaping-curve seeds. Written masked to 31 bits by the emitter so that
+        // this int-based parse round-trips them exactly; one bit off a 2-billion
+        // curve space costs nothing.
+        for (int c=0; c<LICIUM_NUM_CURVES; c++)
+        {
+            char curveprefix[32];
+            sprintf(curveprefix, "curve%d_seed", c);
+            m_nCurveSeed[c] = (unsigned int)GetFastInt(curveprefix, 0, f);
         }
     }
 

@@ -170,3 +170,34 @@ float4 texsize_buf3;
 #define GetBuf1(uv) (tex2D(sampler_buf1,uv).xyz)
 #define GetBuf2(uv) (tex2D(sampler_buf2,uv).xyz)
 #define GetBuf3(uv) (tex2D(sampler_buf3,uv).xyz)
+
+// Licium shaping curves. Each is a 256x1 lookup table baked from the preset's
+// curveN_seed= line (licium_curves.h) - a transfer function that shapes a
+// signal in [0,1] into a signal in [0,1]. Sampling one costs a single fetch no
+// matter how complicated the shape is, which is the whole point: a generator
+// that had only floor/frac/abs could not make a soft ramp, and inline curve
+// math would have spent the ps_3_0 instruction budget in proportion to how
+// interesting the curve was.
+//
+// Declared "fc_" = filter linear + CLAMP. The linear filter is what makes 256
+// stored points behave as a continuous curve (the hardware interpolates between
+// neighbouring entries for free); the clamp is what makes out-of-range input
+// hold at the endpoints instead of wrapping around to the far end of the curve.
+sampler2D sampler_fc_curve0;
+sampler2D sampler_fc_curve1;
+sampler2D sampler_fc_curve2;
+sampler2D sampler_fc_curve3;
+
+// Curve lookup. The remap places input 0 exactly on entry 0 and input 1 exactly
+// on entry 255: texel CENTRES sit at (i+0.5)/256, so feeding the raw value would
+// read half a texel low at both ends. v=0.5 is the single row's centre.
+//
+// The parameter is named _cv, NOT x: the preprocessor substitutes parameter
+// tokens anywhere they appear, INCLUDING after a '.', so a parameter called x
+// would rewrite the trailing ".x" swizzle below into ".uv.x" the moment someone
+// called Curve0(uv.x). That produced "error X3018: invalid subscript '_uv'".
+#define CurveUV(_cv) float2(saturate(_cv)*(255.0/256.0) + (0.5/256.0), 0.5)
+#define Curve0(_cv) (tex2D(sampler_fc_curve0, CurveUV(_cv)).x)
+#define Curve1(_cv) (tex2D(sampler_fc_curve1, CurveUV(_cv)).x)
+#define Curve2(_cv) (tex2D(sampler_fc_curve2, CurveUV(_cv)).x)
+#define Curve3(_cv) (tex2D(sampler_fc_curve3, CurveUV(_cv)).x)

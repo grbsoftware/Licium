@@ -559,6 +559,21 @@ public:
         bool              m_bPassBufClearPending;            // set on preset apply -> buffers cleared at next RunBufferPasses
         IDirect3DTexture9* GetPassBufRead(int n) { return m_lpPassBuf[n][m_nPassBufReadIdx[n]]; }
 
+        // Licium shaping curves: LICIUM_NUM_CURVES lookup tables exposed to
+        // preset shaders as sampler_curve0..3. Each is a 256x1 texture holding a
+        // curve baked from the preset's curveN_seed (licium_curves.h), read with
+        // one tex fetch instead of computing the shape inline — flat cost for any
+        // shape, which is what keeps the ps_3_0 instruction budget affordable as
+        // rolls get wilder.
+        //
+        // Unlike the pass buffers these do NOT ping-pong, so the textures are
+        // allocated ONCE and their CONTENTS are rewritten per preset. That keeps
+        // every texptr stable forever, which is what lets the pristine by-name
+        // binding in CShaderParams::CacheParams bind them with no special case.
+        // D3DPOOL_MANAGED, so they also survive a device reset untouched.
+        IDirect3DTexture9 *m_lpCurveLut[LICIUM_NUM_CURVES];
+        unsigned int       m_nCurveLutSeed[LICIUM_NUM_CURVES];  // seed currently baked into each slot; the cache key
+
         IDirect3DTexture9 *m_lpDDSTitle;    // CAREFUL: MIGHT BE NULL (if not enough mem)!
         int               m_nTitleTexSizeX, m_nTitleTexSizeY;
         MYVERTEX          *m_verts;
@@ -683,6 +698,9 @@ public:
         void        PassBuffers_Ensure();                    // (re)allocate the buffer textures if missing
         void        PassBuffers_Release();                   // null the pointers (textures release via m_textures[])
         void        PassBuffers_ReleaseOne(int n);           // alloc-failure path only
+        void        CurveLuts_Ensure();                      // allocate + register curve0..3 (once)
+        void        CurveLuts_Update(CState* pState);        // (re)bake any slot whose seed changed; call on EVERY preset apply
+        void        CurveLuts_Release();                     // null the pointers (textures release via m_textures[])
         void        UvToMathSpace(float u, float v, float* rad, float* ang);
         void        ApplyShaderParams(CShaderParams* p, LPD3DXCONSTANTTABLE pCT, CState* pState);
         void        RestoreShaderParams();

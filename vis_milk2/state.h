@@ -41,6 +41,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //#include "evallib/eval.h"
 #include "../ns-eel2/ns-eel.h"
 #include "md_defines.h"
+#include "licium_curves.h"  // LICIUM_NUM_CURVES (curve seeds ride in the preset)
 
 // flags for CState::RecompileExpressions():
 #define RECOMPILE_PRESET_CODE  1
@@ -384,6 +385,12 @@ public:
     #define NUM_PASS_BUFS 4
     char            m_szBufShadersText[NUM_PASS_BUFS][MAX_BIGSTRING_LEN];
     int             m_nBufIters[NUM_PASS_BUFS];
+
+    // Licium shaping curves: the seeds of the curve LUTs this preset samples,
+    // parsed from curveN_seed=.. lines. A preset carries SEEDS, not tables —
+    // a curve is fully determined by its seed (licium_curves.h), so the file
+    // stays small and the engine bakes on load. 0 = slot unused.
+    unsigned int    m_nCurveSeed[LICIUM_NUM_CURVES];
 	void			FreeVarsAndCode(bool bFree = true);
 	void			RegisterBuiltInVariables(int flags);
 	void			StripLinefeedCharsAndComments(char *src, char *dest);
