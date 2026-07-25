@@ -98,6 +98,7 @@ struct LatentRoll
     int           vote;                // 1 like / 0 pass / -1 cleared / 999 none
     unsigned char tags[LATENT_NTAGS];
     int           hasNote;
+    int           error;               // flagged broken (e); copied to latent_errors dir
 };
 
 static LatentRoll* g_rolls = NULL;
@@ -238,6 +239,27 @@ static void LoadTags(void)
             if (!r) continue;
             for (int t = 0; t < LATENT_NTAGS; t++)
                 if (!strcmp(tag, TAG_NAMES[t])) { r->tags[t] = (unsigned char)(v ? 1 : 0); break; }
+        }
+    fclose(f);
+}
+
+// Error flags (e): reversible, later-wins, same family as votes/tags. A line is
+// "<id> <0|1>"; the last line for an id wins so un-flagging is recorded, never
+// deleted. The .milk copies in latent_errors\ are a convenience stash, not the
+// source of truth (this sidecar is).
+static void LoadErrors(void)
+{
+    wchar_t path[MAX_PATH];
+    swprintf(path, L"%slatent_errors.txt", g_plugin.m_szMilkdrop2Path);
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+    char idA[LATENT_ID_LEN]; int v;
+    char line[128];
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%19s %d", idA, &v) == 2)
+        {
+            LatentRoll* r = FindRollA(idA);
+            if (r) r->error = (v ? 1 : 0);   // later lines win
         }
     fclose(f);
 }
@@ -438,6 +460,27 @@ static void ToggleTag(LatentRoll* r, int t)
     AppendLineA(L"latent_tags.txt", line);
 }
 
+// Error label (e): flag a roll as broken and stash a COPY of its .milk in
+// latent_errors\ so we can study offline what shader patterns break (feeds the
+// growth-ladder + screen tuning). Reversible - pressing e again clears the flag
+// (a later-wins line) and deletes the copy. The original stays on the shelf;
+// nothing is ever removed from browsing.
+static void ToggleError(LatentRoll* r)
+{
+    r->error ^= 1;
+    char line[64];
+    sprintf(line, "%S %d\r\n", r->id, r->error);
+    AppendLineA(L"latent_errors.txt", line);
+
+    wchar_t dir[MAX_PATH];
+    swprintf(dir, L"%slatent_errors\\", g_plugin.m_szMilkdrop2Path);
+    CreateDirectoryW(dir, NULL);
+    wchar_t dst[MAX_PATH];
+    swprintf(dst, L"%slatent_%s.milk", dir, r->id);
+    if (r->error) CopyFileW(r->file, dst, FALSE);   // COPY (keep the original browsable)
+    else          DeleteFileW(dst);                 // un-flag removes the stash
+}
+
 static void SaveNote(LatentRoll* r, const wchar_t* text)
 {
     if (!text[0]) return;               // empty accept = no line (cancel-like)
@@ -479,6 +522,7 @@ extern "C" void LatentBrowserOpen(void)
     LoadVerdicts();
     LoadVotes();
     LoadTags();
+    LoadErrors();
     LoadNotes(NULL, NULL);
     if (g_count > 1)
         qsort(g_rolls, g_count, sizeof(LatentRoll), RollCompare);
@@ -1181,6 +1225,9 @@ extern "C" int LatentBrowserHandleChar(int ch)
         case '1': case '2': case '3': case '4': case '5': case '6':
             ToggleTag(&g_rolls[g_sel], ch - '1');
             return 1;
+        case 'e': case 'E':
+            ToggleError(&g_rolls[g_sel]);
+            return 1;
         case 'p': case 'P':
             CyclePalette();
             return 1;
@@ -1373,26 +1420,39 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         int line    = h / 30;
         if (line < fh + fh / 4) line = fh + fh / 4;
         if (line < 15) line = 15;
-        int headerH = line * 5 + line / 2;
+        int headerH = line * 6 + line / 2;
         int rowH    = line + 2;
         const int x0 = 10;
 
         wchar_t buf[160];
-        int nVote = 0, nLike = 0, nNo = 0;
+        int nVote = 0, nLike = 0, nNo = 0, nErr = 0;
         for (int i = 0; i < g_count; i++)
         {
             int g = RollGroup(&g_rolls[i]);
             if      (g == 0) nVote++;
             else if (g == 1) nLike++;
             else             nNo++;
+            if (g_rolls[i].error) nErr++;
         }
-        swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
+
+        // Tag-name legend line, built from TAG_NAMES so it never drifts (Gary
+        // "still has no idea what 1-6 are"). Abbreviated to first 3 letters to
+        // keep the panel narrow: "tags 1org 2geo 3gli 4wat 5spa 6???".
+        wchar_t tagLegend[160];
+        {
+            int off = swprintf(tagLegend, L"tags");
+            for (int t = 0; t < LATENT_NTAGS; t++)
+                off += swprintf(tagLegend + off, L" %d%.3S", t + 1, TAG_NAMES[t]);
+        }
+
+        swprintf(buf, L"%d liked \x00b7 %d no \x00b7 %d err", nLike, nNo, nErr);
 
         int maxw = LatTextW(buf);
         {
             int t;
-            if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > maxw) maxw = t;
-            if ((t = LatTextW(L"1-6 tag  D descr"))           > maxw) maxw = t;
+            if ((t = LatTextW(L"Y like  N pass  U clr  e err")) > maxw) maxw = t;
+            if ((t = LatTextW(L"1-6 tag  D descr  c color  / find")) > maxw) maxw = t;
+            if ((t = LatTextW(tagLegend))                      > maxw) maxw = t;
             if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
             if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > maxw) maxw = t;
         }
@@ -1428,15 +1488,18 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                     g_filter[0] ? 0xFFFFD070
                                 : (g_palCycle > 0) ? 0xFF70C0FF
                                 : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
-            swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
-            LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
-            LatText(L"Y like  N pass  U clr  / find",
+            swprintf(buf, L"%d liked \x00b7 %d no \x00b7 %d err", nLike, nNo, nErr);
+            LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2,
+                    nErr ? 0xFFCC8877 : 0xFF9999AA);
+            LatText(L"Y like  N pass  U clr  e err",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
-            LatText(L"1-6 tag  D descr  c color",
+            LatText(L"1-6 tag  D descr  c color  / find",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
+            LatText(tagLegend,
+                    x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
             LatText(g_hideVoted ? L"p pal  h show all  X close"
                                 : L"p pal  h hide voted  X close",
-                    x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
+                    x0, line / 2 + line * 5, x1, line / 2 + line * 6, 0xFF9999AA);
         }
 
         if (g_count == 0)
@@ -1507,9 +1570,10 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 tags[nt] = 0;
 
                 wchar_t buf[96];
-                swprintf(buf, L"%s %s%s%s%s", r->id, VerdictShort(r->verdict),
+                swprintf(buf, L"%s %s%s%s%s%s", r->id, VerdictShort(r->verdict),
                          nt ? L" #" : L"", tags,
-                         r->hasNote ? L" *" : L"");
+                         r->hasNote ? L" *" : L"",
+                         r->error ? L" E" : L"");
 
                 DWORD col;
                 int rk = VerdictRank(r->verdict);
