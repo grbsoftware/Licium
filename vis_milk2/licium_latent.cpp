@@ -30,6 +30,7 @@
 #include <string.h>
 #include <string>
 #include <math.h>
+#include <wctype.h>   // towupper (lineage-filter prefix match)
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
 
@@ -102,8 +103,9 @@ struct LatentRoll
 static LatentRoll* g_rolls = NULL;
 static int         g_count = 0, g_cap = 0;
 
-// Browser state machine. DESCRIBE = the engine waitstring owns the keyboard.
-enum { LB_CLOSED = 0, LB_LANDING, LB_BROWSE, LB_DESCRIBE };
+// Browser state machine. DESCRIBE / FILTER = the engine waitstring owns the
+// keyboard (FILTER types a lineage prefix, e.g. "LX5", to narrow the list).
+enum { LB_CLOSED = 0, LB_LANDING, LB_BROWSE, LB_DESCRIBE, LB_FILTER };
 static int g_state  = LB_CLOSED;
 static int g_sel    = 0;
 static int g_scroll = 0;
@@ -285,17 +287,42 @@ static int RollGroup(const LatentRoll* r)
 static const wchar_t* SECTION_LABEL[3] =
     { L"- to vote -", L"- liked -", L"- passed (no's) -" };
 
+// Parse "LX<gen>-<seed>" / "LXS<gen>-<seed>" into (generation, swarm?, seed).
+// gen = -1 for anything that doesn't parse, so foreign ids sort last.
+static void LatParseId(const wchar_t* id, int* gen, int* swarm, unsigned int* seed)
+{
+    *gen = -1; *swarm = 0; *seed = 0;
+    if (id[0] != L'L' || id[1] != L'X') return;
+    const wchar_t* p = id + 2;
+    if (*p == L'S') { *swarm = 1; p++; }
+    int g = 0, any = 0;
+    while (*p >= L'0' && *p <= L'9') { g = g * 10 + (*p - L'0'); p++; any = 1; }
+    if (!any) return;
+    *gen = g;
+    if (*p == L'-') p++;
+    *seed = (unsigned int)wcstoul(p, NULL, 16);
+}
+
 static int __cdecl RollCompare(const void* a, const void* b)
 {
     const LatentRoll* ra = (const LatentRoll*)a;
     const LatentRoll* rb = (const LatentRoll*)b;
-    // Group first (unvoted -> liked -> passed shelf), then id DESCENDING so the
-    // NEWEST search results sit at the top (higher lineage + higher seed = more
-    // recent). Sort is applied at open only, so a mid-session vote never moves a
-    // roll out from under the cursor.
+    // Group first (unvoted -> liked -> passed shelf). Sort is applied at open
+    // only, so a mid-session vote never moves a roll out from under the cursor.
     int ga = RollGroup(ra), gb = RollGroup(rb);
     if (ga != gb) return ga - gb;
-    return wcscmp(rb->id, ra->id);            // descending
+    // Then NEWEST-FIRST within the group. Plain id-string descending is NOT
+    // enough: "LXS4" > "LX5" char-by-char ('S' 0x53 > '5' 0x35), so a stale
+    // swarm-gen-4 pile would outrank a fresh cold gen-5 haul. Sort by parsed
+    // GENERATION descending (5 beats 4 regardless of the S), then cold before
+    // swarm, then seed descending — so the newest search results sit on top.
+    int gena, genb, swa, swb; unsigned int sa, sb;
+    LatParseId(ra->id, &gena, &swa, &sa);
+    LatParseId(rb->id, &genb, &swb, &sb);
+    if (gena != genb) return genb - gena;              // higher generation first
+    if (swa  != swb ) return swa - swb;                // cold (0) before swarm (1)
+    if (sa   != sb  ) return (sa < sb) ? 1 : -1;       // higher seed first
+    return wcscmp(rb->id, ra->id);                     // stable fallback
 }
 
 // ---- sectioned display list -------------------------------------------------
@@ -311,7 +338,25 @@ static int        g_dispCap    = 0;
 // Toggle (h): when on, the voted rolls (liked + passed) drop out of the list and
 // out of navigation, leaving only the "to vote" rolls. Persisted per Gary's use.
 static int        g_hideVoted  = 0;
-static int RollVisible(int i) { return !g_hideVoted || RollGroup(&g_rolls[i]) == 0; }
+
+// Lineage filter (/): a case-insensitive PREFIX on the id, so "LX5" shows only
+// the LX5 haul, "LXS4" the swarm-gen-4 pile, "LX" all cold+swarm. Empty = off.
+// Lets Gary jump to any lineage regardless of the global newest-first order.
+static wchar_t    g_filter[LATENT_ID_LEN] = { 0 };
+
+static int RollMatchesFilter(int i)
+{
+    if (!g_filter[0]) return 1;
+    const wchar_t* id = g_rolls[i].id;
+    for (int k = 0; g_filter[k]; k++)
+        if (towupper(id[k]) != towupper(g_filter[k])) return 0;   // stops at id's \0 too
+    return 1;
+}
+static int RollVisible(int i)
+{
+    if (g_hideVoted && RollGroup(&g_rolls[i]) != 0) return 0;
+    return RollMatchesFilter(i);
+}
 
 static void BuildDisplayList(void)
 {
@@ -488,6 +533,42 @@ static void BeginDescribe(void)
     swprintf(ws->szPrompt, L"Describe %s - what do you see? (Enter saves, Esc cancels)", r->id);
     ws->szToolTip[0] = 0;
     g_state = LB_DESCRIBE;
+}
+
+// Lineage filter entry (/). Reuses the engine waitstring like describe does,
+// pre-seeded with the current filter so re-filtering edits it in place.
+static void BeginFilter(void)
+{
+    td_waitstr* ws = &g_plugin.m_waitstring;
+    ws->bActive         = true;
+    ws->bFilterBadChars = false;
+    ws->bDisplayAsCode  = false;
+    ws->bOvertypeMode   = false;
+    ws->nSelAnchorPos   = -1;
+    ws->nMaxLen         = LATENT_ID_LEN - 1;
+    for (int k = 0; k < LATENT_ID_LEN; k++) ws->szText[k] = g_filter[k];   // seed from current
+    ws->nCursorPos = (int)wcslen(ws->szText);
+    swprintf(ws->szPrompt,
+             L"Filter by lineage prefix (e.g. LX5) - Enter applies, Esc cancels, empty = all");
+    ws->szToolTip[0] = 0;
+    g_state = LB_FILTER;
+}
+
+// Commit the typed prefix, rebuild the display list, and park the cursor on the
+// first surviving roll (or nothing, if the filter matches none).
+static void ApplyFilter(void)
+{
+    const wchar_t* s = g_plugin.m_waitstring.szText;
+    int k = 0;
+    for (; s[k] && k < LATENT_ID_LEN - 1; k++) g_filter[k] = s[k];
+    g_filter[k] = 0;
+    g_plugin.m_waitstring.bActive = false;
+    g_state = LB_BROWSE;
+    BuildDisplayList();
+    int fv = FirstVisible();
+    g_sel    = (fv >= 0) ? fv : 0;
+    g_scroll = 0;
+    if (g_count && g_dispCount && RollVisible(g_sel)) LoadSelection();
 }
 
 // Voting flows the cursor forward and loads the next roll live — one hand
@@ -1055,6 +1136,7 @@ extern "C" int LatentBrowserHandleChar(int ch)
         return 0;
 
     case LB_DESCRIBE:
+    case LB_FILTER:
         return 0;   // the engine waitstring owns every char
 
     case LB_LANDING:
@@ -1108,6 +1190,9 @@ extern "C" int LatentBrowserHandleChar(int ch)
         case 'd': case 'D':
             BeginDescribe();
             return 1;
+        case '/':
+            BeginFilter();
+            return 1;
         case 'x': case 'X':
             LatentBrowserClose();
             return 1;
@@ -1134,6 +1219,17 @@ extern "C" int LatentBrowserHandleKeydown(int vk)
             g_state = LB_BROWSE;
             return 1;
         }
+        if (vk == VK_ESCAPE)
+        {
+            g_plugin.m_waitstring.bActive = false;
+            g_state = LB_BROWSE;
+            return 1;
+        }
+        return 0;
+
+    case LB_FILTER:
+        // Enter applies the typed prefix, Esc cancels; everything else edits.
+        if (vk == VK_RETURN) { ApplyFilter(); return 1; }
         if (vk == VK_ESCAPE)
         {
             g_plugin.m_waitstring.bActive = false;
@@ -1242,7 +1338,7 @@ static void RenderLanding(IDirect3DDevice9* dev, int w, int h)
 
 extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
 {
-    if (g_state == LB_CLOSED || g_state == LB_DESCRIBE || !dev || w <= 0 || h <= 0)
+    if (g_state == LB_CLOSED || g_state == LB_DESCRIBE || g_state == LB_FILTER || !dev || w <= 0 || h <= 0)
         return;   // describing: yield the screen to the engine's waitstring
 
     // State block mirrors DrawDarkTranslucentBox (restore at the end).
@@ -1295,7 +1391,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         int maxw = LatTextW(buf);
         {
             int t;
-            if ((t = LatTextW(L"Y like  N pass  U clr"))      > maxw) maxw = t;
+            if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > maxw) maxw = t;
             if ((t = LatTextW(L"1-6 tag  D descr"))           > maxw) maxw = t;
             if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
             if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > maxw) maxw = t;
@@ -1317,16 +1413,24 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             // number is how many rolls are still to vote on. Position is dropped
             // (the cursor highlight already shows where you are). palCycle state
             // still rides the title line when re-dressing this roll.
-            if (g_palCycle > 0)
+            if (g_filter[0])
+            {
+                int nShown = 0;
+                for (int i = 0; i < g_count; i++) if (RollVisible(i)) nShown++;
+                swprintf(buf, L"LATENT   \x00b7 [%s]  %d shown", g_filter, nShown);
+            }
+            else if (g_palCycle > 0)
                 swprintf(buf, L"LATENT   \x00b7 %d to vote   pal %d/%d",
                          nVote, g_palCycle, g_likedCount);
             else
                 swprintf(buf, L"LATENT   \x00b7 %d to vote", nVote);
             LatText(buf, x0, line / 2, x1, line / 2 + line,
-                    (g_palCycle > 0) ? 0xFF70C0FF : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
+                    g_filter[0] ? 0xFFFFD070
+                                : (g_palCycle > 0) ? 0xFF70C0FF
+                                : (g_hideVoted ? 0xFF70C0FF : 0xFFFFFFFF));
             swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
             LatText(buf, x0, line / 2 + line, x1, line / 2 + line * 2, 0xFF9999AA);
-            LatText(L"Y like  N pass  U clr",
+            LatText(L"Y like  N pass  U clr  / find",
                     x0, line / 2 + line * 2, x1, line / 2 + line * 3, 0xFF9999AA);
             LatText(L"1-6 tag  D descr  c color",
                     x0, line / 2 + line * 3, x1, line / 2 + line * 4, 0xFF9999AA);
@@ -1340,12 +1444,22 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             LatText(L"No rolls yet - run tools\\latent_prospect, then latent_triage.ps1.",
                     x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
         }
-        else if (g_dispCount == 0)   // all rolls voted, filter hides them
+        else if (g_dispCount == 0)   // nothing visible: filter matched none, or all voted+hidden
         {
-            LatText(L"All rolls voted.",
-                    x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
-            LatText(L"Press h to show liked + passed again.",
-                    x0, headerH + rowH * 2, x1, headerH + rowH * 3, 0xFFCCCCCC);
+            if (g_filter[0])
+            {
+                swprintf(buf, L"No rolls match [%s].", g_filter);
+                LatText(buf, x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
+                LatText(L"Press / then Enter on empty to clear the filter.",
+                        x0, headerH + rowH * 2, x1, headerH + rowH * 3, 0xFFCCCCCC);
+            }
+            else
+            {
+                LatText(L"All rolls voted.",
+                        x0, headerH + rowH, x1, headerH + rowH * 2, 0xFFCCCCCC);
+                LatText(L"Press h to show liked + passed again.",
+                        x0, headerH + rowH * 2, x1, headerH + rowH * 3, 0xFFCCCCCC);
+            }
         }
         else
         {
