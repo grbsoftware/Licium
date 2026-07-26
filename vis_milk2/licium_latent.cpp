@@ -367,7 +367,13 @@ static int __cdecl RollCompare(const void* a, const void* b)
     LatParseId(ra->id, &gena, &swa, &sa);
     LatParseId(rb->id, &genb, &swb, &sb);
     if (gena != genb) return genb - gena;              // higher generation first
-    if (swa  != swb ) return swa - swb;                // cold(0), swarm(1), family(2)
+    // Within a generation, FAMILY rolls (the newest activity - fresh +1 grafts
+    // off a winner) sort to the TOP, then cold, then swarm (Gary, 2026-07-25:
+    // "list highest to lowest" - the freshest experiment on top). The parsed
+    // generation NUMBER still dominates; this only orders same-gen trunks.
+    int ranka = (swa == 2) ? -1 : swa;                 // family -1, cold 0, swarm 1
+    int rankb = (swb == 2) ? -1 : swb;
+    if (ranka != rankb) return ranka - rankb;
     if (sa   != sb  ) return (sa < sb) ? 1 : -1;       // higher seed first
     return wcscmp(rb->id, ra->id);                     // stable fallback
 }
