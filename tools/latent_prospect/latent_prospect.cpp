@@ -1380,6 +1380,20 @@ static int CmpFamStratify(const void* a, const void* b)
     return (int)pa->packed - (int)pb->packed;               // stable
 }
 
+// One emit bucket = all passers grafted at the same (family, site). `ord` is the
+// bucket's index WITHIN its family, and the walk is ordered by it so families
+// interleave: site-0 of every family, then site-1 of every family, and so on.
+struct FamBucket { int start, end, fam, ord; };
+
+static int CmpFamBucket(const void* a, const void* b)
+{
+    const FamBucket* pa = (const FamBucket*)a;
+    const FamBucket* pb = (const FamBucket*)b;
+    if (pa->ord != pb->ord) return pa->ord - pb->ord;       // round-robin families
+    if (pa->fam != pb->fam) return pa->fam - pb->fam;       // then library order
+    return pa->start - pb->start;                           // stable (site order)
+}
+
 static int EmitFamilyRoll(const Family* fm, const Tree* graft, unsigned int packed,
                           const char* outdir)
 {
@@ -1486,20 +1500,38 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
     qpath[sizeof(qpath) - 1] = 0;
     FILE* q = fopen(qpath, "ab");
 
+    // Cut the sorted passers into (family, site) buckets, number each bucket
+    // within its family, and order the walk by that number. Walking in raw sort
+    // order is family-major, so the emit cap is spent entirely on the lowest
+    // family indices — a 7-family library at --emit 70 emitted families 0 and 1
+    // and nothing else. Interleaved, an emit cap of N spreads over all families.
+    std::vector<FamBucket> buckets;
+    for (int i = 0; i < npass; )
+    {
+        int j = i + 1;
+        while (j < npass && pp[j].fam == pp[i].fam && pp[j].site == pp[i].site) j++;
+        FamBucket b; b.start = i; b.end = j; b.fam = pp[i].fam; b.ord = 0;
+        buckets.push_back(b);
+        i = j;
+    }
+    int nBuckets = (int)buckets.size();
+    FamBucket* bb = buckets.empty() ? NULL : &buckets[0];
+    {
+        std::vector<int> nSeen((size_t)(g_nFam > 0 ? g_nFam : 1), 0);
+        for (int b = 0; b < nBuckets; b++) bb[b].ord = nSeen[(size_t)bb[b].fam]++;
+    }
+    qsort(bb, nBuckets, sizeof(FamBucket), CmpFamBucket);
+
     std::vector<char> used((size_t)npass, 0);
     int nEmitted = 0;
     int anyLeft = 1;
     while (anyLeft && nEmitted < emitCap)
     {
         anyLeft = 0;
-        int i = 0;
-        while (i < npass && nEmitted < emitCap)
+        for (int b = 0; b < nBuckets && nEmitted < emitCap; b++)
         {
-            // one (fam,site) bucket = [i, j)
-            int j = i + 1;
-            while (j < npass && pp[j].fam == pp[i].fam && pp[j].site == pp[i].site) j++;
             // take this bucket's best not-yet-used (they're score-sorted within)
-            for (int k = i; k < j; k++)
+            for (int k = bb[b].start; k < bb[b].end; k++)
                 if (!used[(size_t)k])
                 {
                     used[(size_t)k] = 1;
@@ -1520,7 +1552,6 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
                     }
                     break;   // one per bucket per round
                 }
-            i = j;
         }
     }
     if (q) fclose(q);
