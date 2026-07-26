@@ -1120,6 +1120,416 @@ static int DedupSeen(unsigned int h)
     return 0;   // crowded neighborhood: admit rather than drop (dedup is advisory)
 }
 
+// ===== Families (LXF trunk): the +1 graft ===================================
+// A promoted (liked) tree seeds a NEW trunk. At every node SITE across both
+// roots we graft exactly one node keeping the existing subtree, and enumerate
+// EVERY such graft EXHAUSTIVELY - no RNG. The (site, variant) pair is a flat
+// index: graftIdx = site * g_nGrafts + variant; id = (familyIdx<<16)|graftIdx,
+// lineage LXF<genver>-. THE ENUMERATION ORDER BELOW IS A FROZEN CONTRACT -
+// changing g_grafts or the site order re-labels every existing family roll (that
+// is a family-version bump, tracked here, NOT a cold genver bump). Design:
+// docs\SHADER_CURVES_DESIGN.md (Families section).
+
+// Graft terminal choices: the 7 non-const terminals (NK_PX..NK_FB) + a fixed
+// const ladder. The ladder is part of the frozen contract.
+static const float LXF_CONST_LADDER[] = { -1.0f, 0.5f, 1.0f, 2.0f };
+#define LXF_NCONST (int)(sizeof(LXF_CONST_LADDER) / sizeof(LXF_CONST_LADDER[0]))
+
+static int LxfCommutative(int b) { return b == NK_ADD || b == NK_MUL || b == NK_MIN || b == NK_MAX; }
+
+struct GraftDesc
+{
+    int   isBinary;   // 0 unary wrap u(T), 1 binary wrap b(T,term)/b(term,T)
+    int   kind;       // unary kind, or binary kind
+    int   slot;       // curve slot for a NK_CURVE unary
+    int   termKind;   // binary only: the grafted terminal kind
+    float termCval;   // binary only: const value if termKind == NK_CONST
+    int   tLeft;      // binary only: 1 => b(T, term), 0 => b(term, T)
+};
+static GraftDesc g_grafts[256];
+static int       g_nGrafts = 0;
+
+// Build the frozen variant table once. Order: 7 unary wraps, then for each
+// binary kind, each terminal choice (7 vars then the const ladder), each
+// ordering (commutative binaries emit only T-left; others emit both).
+static void BuildGraftTable(void)
+{
+    if (g_nGrafts) return;
+    static const int uk[7] = { NK_ABS, NK_FRAC, NK_FLOOR, NK_NEG, NK_CURVE, NK_CURVE, NK_CURVE };
+    static const int us[7] = { 0, 0, 0, 0, 0, 1, 2 };
+    for (int i = 0; i < 7; i++)
+    {
+        GraftDesc d = { 0, uk[i], us[i], 0, 0.0f, 0 };
+        g_grafts[g_nGrafts++] = d;
+    }
+    for (int b = NK_ADD; b <= NK_LT; b++)
+        for (int tsel = 0; tsel < 7 + LXF_NCONST; tsel++)
+        {
+            int   termKind = (tsel < 7) ? (NK_PX + tsel) : NK_CONST;
+            float cv       = (tsel < 7) ? 0.0f : LXF_CONST_LADDER[tsel - 7];
+            int   orders   = LxfCommutative(b) ? 1 : 2;
+            for (int o = 0; o < orders; o++)
+            {
+                GraftDesc d = { 1, b, 0, termKind, cv, (o == 0) ? 1 : 0 };
+                g_grafts[g_nGrafts++] = d;
+            }
+        }
+}
+
+// Apply one graft (site index, variant) to a COPY of the family tree. Returns 0
+// if the pool is full. The site's subtree is kept intact; its parent link (a
+// root or a node's l/r - a tree has exactly one) is repointed at the wrap node.
+static int ApplyGraft(const Tree* src, int site, const GraftDesc* g, Tree* dst)
+{
+    if (src->count >= LX_MAX_NODES - 2) return 0;
+    *dst = *src;
+    int orig = src->count;
+    int wrap = dst->count++;
+    Node* w = &dst->nodes[wrap];
+    w->kind = g->kind; w->cval = 0.0f; w->slot = g->slot; w->l = -1; w->r = -1;
+    if (!g->isBinary)
+        w->l = site;                          // u(T)
+    else
+    {
+        int term = dst->count++;
+        Node* tn = &dst->nodes[term];
+        tn->kind = g->termKind; tn->cval = g->termCval; tn->slot = 0; tn->l = -1; tn->r = -1;
+        if (g->tLeft) { w->l = site; w->r = term; }   // b(T, term)
+        else          { w->l = term; w->r = site; }   // b(term, T)
+    }
+    if      (dst->root  == site) dst->root  = wrap;
+    else if (dst->root2 == site) dst->root2 = wrap;
+    else
+        for (int k = 0; k < orig; k++)        // parent is an original node
+        {
+            if (dst->nodes[k].l == site) { dst->nodes[k].l = wrap; break; }
+            if (dst->nodes[k].r == site) { dst->nodes[k].r = wrap; break; }
+        }
+    return 1;
+}
+
+// ---- frozen family library (latent_families.txt) ---------------------------
+// Append-only; a family's index is its position and is PERMANENT. Each record:
+//   F <index> <originId> <seedHex> <decay> <root> <root2> <count>
+//   N <kind> <cval> <slot> <l> <r>      (count lines)
+// Curves re-derive from the stored origin seed at load (the same stable
+// side-hash EmitPreset uses), so a family reproduces genver-independently.
+struct Family
+{
+    char         originId[24];
+    unsigned int seed;
+    float        decay;
+    Tree         tree;
+};
+static Family g_fam[4096];
+static int    g_nFam = 0;
+
+static void FamilyBakeCurves(Family* fm)
+{
+    for (int c = 0; c < LICIUM_NUM_CURVES; c++)
+        fm->tree.curve[c] = LiciumCurveFromSeed(CurveSeedOfSlot(fm->seed, c));
+}
+
+static int LoadFamilies(const char* stateDir)
+{
+    g_nFam = 0;
+    char path[1024];
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_families.txt", stateDir);
+    path[sizeof(path) - 1] = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    char line[512];
+    Family* cur = NULL;
+    int nodeLeft = 0, ni = 0;
+    while (fgets(line, sizeof(line), f))
+    {
+        if (line[0] == '#') continue;
+        if (line[0] == 'F')
+        {
+            if (g_nFam >= 4096) break;
+            cur = &g_fam[g_nFam++];
+            int idx, root, root2, count; char oid[24]; unsigned int seed; double decay;
+            if (sscanf(line, "F %d %23s %x %lf %d %d %d",
+                       &idx, oid, &seed, &decay, &root, &root2, &count) == 7)
+            {
+                strncpy(cur->originId, oid, 23); cur->originId[23] = 0;
+                cur->seed = seed; cur->decay = (float)decay;
+                cur->tree.count = count; cur->tree.root = root; cur->tree.root2 = root2;
+                cur->tree.hardCount = 0;
+                nodeLeft = count; ni = 0;
+            }
+            else { g_nFam--; cur = NULL; nodeLeft = 0; }
+        }
+        else if (line[0] == 'N' && cur && nodeLeft > 0)
+        {
+            int kind, slot, l, r; double cval;
+            if (sscanf(line, "N %d %lf %d %d %d", &kind, &cval, &slot, &l, &r) == 5 && ni < LX_MAX_NODES)
+            {
+                Node* n = &cur->tree.nodes[ni++];
+                n->kind = kind; n->cval = (float)cval; n->slot = slot; n->l = l; n->r = r;
+                nodeLeft--;
+            }
+        }
+    }
+    fclose(f);
+    for (int i = 0; i < g_nFam; i++) FamilyBakeCurves(&g_fam[i]);
+    return g_nFam;
+}
+
+static int FamilyKnown(const char* originId)
+{
+    for (int i = 0; i < g_nFam; i++)
+        if (!strcmp(g_fam[i].originId, originId)) return 1;
+    return 0;
+}
+
+static void AppendFamilyRecord(const char* stateDir, int index, const char* originId,
+                               unsigned int seed, float decay, const Tree* t)
+{
+    char path[1024];
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_families.txt", stateDir);
+    path[sizeof(path) - 1] = 0;
+    int fresh = 1;
+    { FILE* c = fopen(path, "rb"); if (c) { fresh = 0; fclose(c); } }
+    FILE* f = fopen(path, "ab");
+    if (!f) { printf("promote: cannot open %s\n", path); return; }
+    if (fresh)
+        fprintf(f, "# latent families - append-only; index = record order; DO NOT reorder or delete.\n");
+    fprintf(f, "F %d %s %08X %.6f %d %d %d\n",
+            index, originId, seed, decay, t->root, t->root2, t->count);
+    for (int i = 0; i < t->count; i++)
+        fprintf(f, "N %d %.4f %d %d %d\n",
+                t->nodes[i].kind, t->nodes[i].cval, t->nodes[i].slot, t->nodes[i].l, t->nodes[i].r);
+    fclose(f);
+}
+
+// --promote STATEDIR: for each id currently flagged in latent_promote.txt
+// (later-wins) that isn't already a family, rebuild its tree from the seed under
+// the CURRENT grammar and freeze it into latent_families.txt. Foreign-genver ids
+// are refused - a seed only rebuilds its real tree under the grammar that made it.
+static int PromoteFromState(const char* stateDir)
+{
+    BuildGraftTable();
+    LoadFamilies(stateDir);   // seeds g_nFam so appends continue the index
+    int startIdx = g_nFam;
+
+    // later-wins set of currently-flagged ids
+    struct Flag { char id[24]; int on; };
+    static Flag flags[2048];
+    int nf = 0;
+    char path[1024], line[512];
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_promote.txt", stateDir);
+    path[sizeof(path) - 1] = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("promote: no latent_promote.txt in %s (press 'f' in X first)\n", stateDir); return 0; }
+    char id[24]; int v;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%23s %d", id, &v) == 2)
+        {
+            int j = -1;
+            for (int i = 0; i < nf; i++) if (!strcmp(flags[i].id, id)) { j = i; break; }
+            if (j < 0 && nf < 2048) { j = nf++; strncpy(flags[j].id, id, 23); flags[j].id[23] = 0; }
+            if (j >= 0) flags[j].on = v;   // later lines win
+        }
+    fclose(f);
+
+    int added = 0, skipForeign = 0, skipDup = 0, skipGrow = 0;
+    for (int i = 0; i < nf; i++)
+    {
+        if (!flags[i].on) continue;
+        if (FamilyKnown(flags[i].id)) { skipDup++; continue; }
+        // id = "LX<gen>-<seedhex>" (cold only; a family seeds from a COLD winner)
+        int gen; unsigned int seed;
+        if (sscanf(flags[i].id, "LX%d-%x", &gen, &seed) != 2)
+        {
+            printf("promote: skip %s (not a cold LX id)\n", flags[i].id);
+            skipForeign++; continue;
+        }
+        if (gen != LX_GENVER)
+        {
+            printf("promote: skip %s (genver %d != current %d - rebuild grammar mismatch)\n",
+                   flags[i].id, gen, LX_GENVER);
+            skipForeign++; continue;
+        }
+        Tree t; float decay;
+        if (!BuildFromSeed(seed, &t, &decay)) { skipGrow++; continue; }
+        AppendFamilyRecord(stateDir, startIdx + added, flags[i].id, seed, decay, &t);
+        printf("promote: +family %d <- %s (%d nodes, ink %d / psi %d)\n",
+               startIdx + added, flags[i].id, t.count,
+               SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2));
+        added++;
+    }
+    printf("promote: %d added, %d already-known, %d foreign/bad, %d grow-fail -> %d families total\n",
+           added, skipDup, skipForeign, skipGrow, startIdx + added);
+    return added;
+}
+
+// --families STATEDIR --outdir DIR: exhaustively graft every promoted family,
+// screen, and emit a stratified-by-site slice as LXF<gen>- rolls next to the
+// cold haul. Deterministic (no RNG) - same library + code => byte-identical rolls.
+struct FamPasser { int fam; int site; int variant; unsigned int packed; float score; };
+
+static int CmpFamStratify(const void* a, const void* b)
+{
+    const FamPasser* pa = (const FamPasser*)a;
+    const FamPasser* pb = (const FamPasser*)b;
+    if (pa->fam  != pb->fam ) return pa->fam  - pb->fam;    // group by family
+    if (pa->site != pb->site) return pa->site - pb->site;   // then by graft site
+    if (pa->score > pb->score) return -1;                   // best first within a site
+    if (pa->score < pb->score) return 1;
+    return (int)pa->packed - (int)pb->packed;               // stable
+}
+
+static int EmitFamilyRoll(const Family* fm, const Tree* graft, unsigned int packed,
+                          const char* outdir)
+{
+    Str s; s.Init();
+    if (!s.buf) return 0;
+    EmitPreset(fm->seed, graft, fm->decay, &s);   // origin seed -> winner's palette+curves
+    char path[1024];
+    _snprintf(path, sizeof(path) - 1, "%s\\latent_LXF%d-%08X.milk", outdir, LX_GENVER, packed);
+    path[sizeof(path) - 1] = 0;
+    int ok = WriteBytes(path, s.buf, s.len);
+    s.Free();
+    return ok;
+}
+
+static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
+{
+    BuildGraftTable();
+    int nfam = LoadFamilies(stateDir);
+    if (!nfam) { printf("families: latent_families.txt empty or missing in %s (run --promote first)\n", stateDir); return 1; }
+    printf("families: %d promoted, %d graft variants/site, lineage LXF%d\n", nfam, g_nGrafts, LX_GENVER);
+
+    // Screen every graft in parallel. Work units = (family, site) pairs, each
+    // expanding to g_nGrafts screens; workers take contiguous unit ranges into
+    // private buffers (family trees are read-only). Order is irrelevant here -
+    // the stratify sort below is a total order, so the emitted slice is
+    // deterministic regardless of thread scheduling.
+    struct Unit { int fam; int site; };
+    std::vector<Unit> units;
+    for (int fi = 0; fi < nfam; fi++)
+        for (int si = 0; si < g_fam[fi].tree.count; si++)   // pool order = both roots' preorder
+        {
+            Unit u; u.fam = fi; u.site = si; units.push_back(u);
+        }
+    unsigned int totalGrafts = (unsigned int)units.size() * (unsigned int)g_nGrafts;
+
+    int nThreads = (int)std::thread::hardware_concurrency() - 2;
+    if (nThreads < 1) nThreads = 1;
+    if ((int)units.size() < nThreads) nThreads = (int)units.size();
+    if (nThreads < 1) nThreads = 1;
+
+    std::vector<std::vector<FamPasser> > localP((size_t)nThreads);
+    std::atomic<unsigned int> graftDone(0), screenPass(0);
+
+    {
+        std::vector<std::thread> pool;
+        int nu = (int)units.size();
+        int chunk = nu / nThreads;
+        for (int w = 0; w < nThreads; w++)
+        {
+            int u0 = chunk * w;
+            int u1 = (w == nThreads - 1) ? nu : (u0 + chunk);
+            pool.push_back(std::thread([&, w, u0, u1]()
+            {
+                std::vector<FamPasser>& out = localP[(size_t)w];
+                for (int ui = u0; ui < u1; ui++)
+                {
+                    int fi = units[(size_t)ui].fam, si = units[(size_t)ui].site;
+                    Family* fm = &g_fam[fi];
+                    for (int vi = 0; vi < g_nGrafts; vi++)
+                    {
+                        Tree g;
+                        if (!ApplyGraft(&fm->tree, si, &g_grafts[vi], &g)) continue;
+                        for (int c = 0; c < LICIUM_NUM_CURVES; c++) g.curve[c] = fm->tree.curve[c];
+                        g.hardCount = 0;
+                        ScreenResult r;
+                        int ok = ScreenCandidate(&g, LensOfSeed(fm->seed), fm->decay, &r);
+                        unsigned int gd = graftDone.fetch_add(1) + 1;
+                        if (ok)
+                        {
+                            screenPass.fetch_add(1);
+                            FamPasser p;
+                            p.fam = fi; p.site = si; p.variant = vi;
+                            p.packed = ((unsigned int)fi << 16) | (unsigned int)(si * g_nGrafts + vi);
+                            p.score = r.score;
+                            out.push_back(p);
+                        }
+                        if ((gd & 0xFFF) == 0)   // ~every 4096 grafts
+                        {
+                            printf("  ...%u/%u grafts, %u passed\n", gd, totalGrafts, screenPass.load());
+                            fflush(stdout);
+                        }
+                    }
+                }
+            }));
+        }
+        for (size_t i = 0; i < pool.size(); i++) pool[i].join();
+    }
+
+    std::vector<FamPasser> pass;
+    for (int w = 0; w < nThreads; w++)
+        for (size_t i = 0; i < localP[(size_t)w].size(); i++)
+            pass.push_back(localP[(size_t)w][i]);
+    unsigned int nGrafted = graftDone.load(), nScreened = screenPass.load();
+
+    // Stratify by (family, site) round-robin: sort, then walk sites in rounds,
+    // taking each site's best-remaining until the emit cap is hit. Maximises
+    // "what happens if I add something HERE" spread over one grading session.
+    FamPasser* pp = pass.empty() ? NULL : &pass[0];
+    int npass = (int)pass.size();
+    qsort(pp, npass, sizeof(FamPasser), CmpFamStratify);
+
+    char qpath[1024];
+    _snprintf(qpath, sizeof(qpath) - 1, "%s\\queue.jsonl", outdir);
+    qpath[sizeof(qpath) - 1] = 0;
+    FILE* q = fopen(qpath, "ab");
+
+    std::vector<char> used((size_t)npass, 0);
+    int nEmitted = 0;
+    int anyLeft = 1;
+    while (anyLeft && nEmitted < emitCap)
+    {
+        anyLeft = 0;
+        int i = 0;
+        while (i < npass && nEmitted < emitCap)
+        {
+            // one (fam,site) bucket = [i, j)
+            int j = i + 1;
+            while (j < npass && pp[j].fam == pp[i].fam && pp[j].site == pp[i].site) j++;
+            // take this bucket's best not-yet-used (they're score-sorted within)
+            for (int k = i; k < j; k++)
+                if (!used[(size_t)k])
+                {
+                    used[(size_t)k] = 1;
+                    anyLeft = 1;
+                    Family* fm = &g_fam[pp[k].fam];
+                    Tree g;
+                    if (ApplyGraft(&fm->tree, pp[k].site, &g_grafts[pp[k].variant], &g))
+                    {
+                        for (int c = 0; c < LICIUM_NUM_CURVES; c++) g.curve[c] = fm->tree.curve[c];
+                        g.hardCount = 0;
+                        if (EmitFamilyRoll(fm, &g, pp[k].packed, outdir))
+                        {
+                            nEmitted++;
+                            if (q)
+                                fprintf(q, "{\"id\":\"LXF%d-%08X\",\"score\":%.5f,\"family\":%d,\"site\":%d,\"emitted\":1}\n",
+                                        LX_GENVER, pp[k].packed, pp[k].score, pp[k].fam, pp[k].site);
+                        }
+                    }
+                    break;   // one per bucket per round
+                }
+            i = j;
+        }
+    }
+    if (q) fclose(q);
+
+    printf("families: %u grafts, %u passed screens, %d emitted -> %s (%d threads)\n",
+           nGrafted, nScreened, nEmitted, outdir, nThreads);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     unsigned int start = 0, count = 0, single = 0;
@@ -1128,6 +1538,8 @@ int main(int argc, char** argv)
     const char* outdir = NULL;
     const char* swarmDir = NULL;       // --swarm <Licium state dir> = LXS1 mode
     const char* outfile = NULL;        // --outfile PATH: exact path for --seed
+    const char* promoteDir = NULL;     // --promote <state dir>: freeze flagged rolls
+    const char* familiesDir = NULL;    // --families <state dir>: +1-graft scan
 
     for (int i = 1; i < argc; i++)
     {
@@ -1161,7 +1573,18 @@ int main(int argc, char** argv)
             else { printf("unknown seek profile: %s (profiles: threads)\n", profile); return 1; }
         }
         else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
+        else if (!strcmp(argv[i], "--promote")  && i + 1 < argc) promoteDir  = argv[++i];
+        else if (!strcmp(argv[i], "--families") && i + 1 < argc) familiesDir = argv[++i];
         else { printf("unknown arg: %s\n", argv[i]); return 1; }
+    }
+
+    if (promoteDir)
+        return PromoteFromState(promoteDir) >= 0 ? 0 : 1;
+
+    if (familiesDir)
+    {
+        if (!outdir) { printf("--families needs --outdir DIR\n"); return 1; }
+        return FamilyScan(familiesDir, outdir, emitCap);
     }
 
     if (haveDecode)
@@ -1218,6 +1641,10 @@ int main(int argc, char** argv)
         printf("              table manifest archived next to the queue\n");
         printf("  --seek threads            rank-side profile: surface filament/thread\n");
         printf("              visuals (ridge-rich, blob-poor fields); combinable with --swarm\n");
+        printf("  --promote STATEDIR        freeze rolls flagged in latent_promote.txt ('f' in X)\n");
+        printf("              into latent_families.txt (append-only, cold LX%d ids only)\n", LX_GENVER);
+        printf("  --families STATEDIR --outdir DIR [--emit K]   +1-graft every promoted\n");
+        printf("              family exhaustively, screen, stratify-by-site emit as LXF%d- rolls\n", LX_GENVER);
         printf("  --seed HEX --outdir DIR   screen + force-emit one seed\n");
         printf("  --decode HEX              print chain + formula (cold lineages only)\n");
         printf("  --selftest                byte-identical double-emission check\n");
