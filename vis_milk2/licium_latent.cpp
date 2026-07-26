@@ -1485,7 +1485,9 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         // Tag-name legend line, built from TAG_NAMES so it never drifts (Gary
         // "still has no idea what 1-6 are"). Abbreviated to first 3 letters to
         // keep the panel narrow: "tags 1org 2geo 3gli 4wat 5spa 6???".
-        wchar_t tagLegend[160];
+        // TAG_NAMES is compile-time constant, so build this once, not per frame.
+        static wchar_t tagLegend[160] = { 0 };
+        if (!tagLegend[0])
         {
             int off = swprintf(tagLegend, L"tags");
             for (int t = 0; t < LATENT_NTAGS; t++)
@@ -1499,16 +1501,28 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
 
         swprintf(buf, L"%d liked \x00b7 %d no", nLike, nNo);
 
-        int maxw = LatTextW(buf);
+        // Panel width. CAREFUL: every LatTextW is a GetDC + GetTextExtentPoint32W
+        // + ReleaseDC round trip (pluginshell.cpp HostMeasureTextW), and this
+        // block used to run on EVERY frame - ~7 GDI round trips per frame while
+        // the browser is open, right next to the D3D render loop. The width only
+        // moves when the counts or the UI text scale change, so measure on a
+        // signature miss and reuse the cached width otherwise (steady-state
+        // browsing = zero GDI calls per frame).
+        static int s_w = 0, s_sLine = -1, s_sLike = -1, s_sNo = -1, s_sErr = -1, s_sProm = -1;
+        if (s_sLine != line || s_sLike != nLike || s_sNo != nNo ||
+            s_sErr != nErr || s_sProm != nProm)
         {
-            int t;
-            if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > maxw) maxw = t;
-            if ((t = LatTextW(annLine))                        > maxw) maxw = t;
-            if ((t = LatTextW(L"1-6 tag  D descr  c color"))    > maxw) maxw = t;
-            if ((t = LatTextW(tagLegend))                      > maxw) maxw = t;
-            if ((t = LatTextW(L"p pal  h hide voted  X close")) > maxw) maxw = t;
-            if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > maxw) maxw = t;
+            int m = LatTextW(buf), t;
+            if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > m) m = t;
+            if ((t = LatTextW(annLine))                        > m) m = t;
+            if ((t = LatTextW(L"1-6 tag  D descr  c color"))    > m) m = t;
+            if ((t = LatTextW(tagLegend))                      > m) m = t;
+            if ((t = LatTextW(L"p pal  h hide voted  X close")) > m) m = t;
+            if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > m) m = t;
+            s_w = m;
+            s_sLine = line; s_sLike = nLike; s_sNo = nNo; s_sErr = nErr; s_sProm = nProm;
         }
+        int maxw = s_w;
 
         float panelW = (float)(x0 + maxw + 10);          // ~10px right of the text
         if (panelW < 150.0f)      panelW = 150.0f;
