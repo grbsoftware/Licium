@@ -1338,24 +1338,89 @@ static int PromoteFromState(const char* stateDir)
     {
         if (!flags[i].on) continue;
         if (FamilyKnown(flags[i].id)) { skipDup++; continue; }
-        // id = "LX<gen>-<seedhex>" (cold only; a family seeds from a COLD winner)
-        int gen; unsigned int seed;
-        if (sscanf(flags[i].id, "LX%d-%x", &gen, &seed) != 2)
+
+        Tree t; float decay; unsigned int seed;
+        int gen;
+
+        // ROUND 2+ : the origin is itself a family roll, "LXF<gen>-<packed>".
+        // A round-N family is just another append-only library entry whose
+        // origin happens to be a graft rather than a cold seed - so depth is a
+        // LIBRARY attribute and the id format never changes (the alternative,
+        // an explicit round counter in the id, would have cost another
+        // LatParseId migration for nothing). Its tree is the parent's tree with
+        // the parent's graft already applied, so the next --families run grafts
+        // on top of that: +1 becomes +2, then +3, as deep as rolls keep earning
+        // an f. Palette, curves and decay are INHERITED from the parent family
+        // (they derive from the original cold seed), which is what keeps a
+        // lineage looking like itself as it deepens.
+        if (sscanf(flags[i].id, "LXF%d-%x", &gen, &seed) == 2)
         {
-            printf("promote: skip %s (not a cold LX id)\n", flags[i].id);
+            if (gen != LX_GENVER)
+            {
+                printf("promote: skip %s (genver %d != current %d - rebuild grammar mismatch)\n",
+                       flags[i].id, gen, LX_GENVER);
+                skipForeign++; continue;
+            }
+            int famIdx  = (int)(seed >> 16);
+            int graftIdx= (int)(seed & 0xFFFF);
+            if (famIdx < 0 || famIdx >= g_nFam || g_nGrafts <= 0)
+            {
+                printf("promote: skip %s (family %d not in the library - promote its parent first)\n",
+                       flags[i].id, famIdx);
+                skipForeign++; continue;
+            }
+            int site    = graftIdx / g_nGrafts;
+            int variant = graftIdx % g_nGrafts;
+            Family* parent = &g_fam[famIdx];
+            if (variant >= g_nGrafts || site >= parent->tree.count)
+            {
+                printf("promote: skip %s (graft %d out of range for family %d)\n",
+                       flags[i].id, graftIdx, famIdx);
+                skipForeign++; continue;
+            }
+            if (!ApplyGraft(&parent->tree, site, &g_grafts[variant], &t))
+            {
+                skipGrow++; continue;
+            }
+            seed  = parent->seed;      // palette + curves stay the lineage's own
+            decay = parent->decay;
+        }
+        // ROUND 1: a cold winner. The seed rebuilds the tree, so the grammar
+        // that made it has to be the grammar running now.
+        else if (sscanf(flags[i].id, "LX%d-%x", &gen, &seed) == 2)
+        {
+            if (gen != LX_GENVER)
+            {
+                printf("promote: skip %s (genver %d != current %d - rebuild grammar mismatch)\n",
+                       flags[i].id, gen, LX_GENVER);
+                skipForeign++; continue;
+            }
+            if (!BuildFromSeed(seed, &t, &decay)) { skipGrow++; continue; }
+        }
+        else
+        {
+            printf("promote: skip %s (not a cold LX or family LXF id)\n", flags[i].id);
             skipForeign++; continue;
         }
-        if (gen != LX_GENVER)
+
+        int idx = startIdx + added;
+        AppendFamilyRecord(stateDir, idx, flags[i].id, seed, decay, &t);
+
+        // Register in memory too, so a chain promoted in ONE run resolves: a
+        // round-3 id flagged alongside its round-2 parent needs that parent to
+        // be findable, and LoadFamilies only ran before the loop.
+        if (g_nFam < 4096 && idx == g_nFam)
         {
-            printf("promote: skip %s (genver %d != current %d - rebuild grammar mismatch)\n",
-                   flags[i].id, gen, LX_GENVER);
-            skipForeign++; continue;
+            Family* fm = &g_fam[g_nFam++];
+            strncpy(fm->originId, flags[i].id, 23); fm->originId[23] = 0;
+            fm->seed  = seed;
+            fm->decay = decay;
+            fm->tree  = t;
+            FamilyBakeCurves(fm);
         }
-        Tree t; float decay;
-        if (!BuildFromSeed(seed, &t, &decay)) { skipGrow++; continue; }
-        AppendFamilyRecord(stateDir, startIdx + added, flags[i].id, seed, decay, &t);
+
         printf("promote: +family %d <- %s (%d nodes, ink %d / psi %d)\n",
-               startIdx + added, flags[i].id, t.count,
+               idx, flags[i].id, t.count,
                SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2));
         added++;
     }
