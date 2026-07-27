@@ -89,6 +89,7 @@ struct LcLayout
     float side;         // square edge
     float top;          // first square's top
     float pitch;        // square edge + gap
+    float titleY;       // baseline row for the header
     int   fh;
 };
 
@@ -97,18 +98,20 @@ static void LcComputeLayout(int w, int h, LcLayout* L)
     L->fh = g_plugin.GetFontHeight(SIMPLE_FONT);
     if (L->fh < 8) L->fh = 8;
 
-    // A square a bit over two lines tall reads as a tool button rather than a
-    // text row, and keeps a 3-character label comfortably inside it.
-    L->side = (float)(L->fh * 2 + L->fh / 2);
+    // Five lines tall (Gary 2026-07-27: twice the original, which read as small
+    // buttons rattling around in a wide column). The square drives the dock
+    // width rather than the other way round, so the buttons always fill it.
+    L->side = (float)(L->fh * 5);
 
     float pad = (float)(L->fh / 2);
     if (pad < 4.0f) pad = 4.0f;
 
     float width = L->side + pad * 2.0f;
 
-    // Never eat more than a fifth of a narrow canvas (the porthole square can
-    // be 512px). Below that the squares shrink instead of the canvas.
-    float cap = (float)w * 0.20f;
+    // Ceiling on a narrow canvas (the porthole square can be 512px). At a third
+    // the dock stays a strip rather than becoming the composition; past that
+    // the squares shrink instead of the canvas.
+    float cap = (float)w * 0.33f;
     if (width > cap && cap > 16.0f)
     {
         width   = cap;
@@ -117,16 +120,18 @@ static void LcComputeLayout(int w, int h, LcLayout* L)
 
     L->x1    = (float)w;
     L->x0    = (float)w - width;
-    L->pitch = L->side + (float)(L->fh / 3);
+    L->pitch = L->side + (float)(L->fh / 2);
     if (L->pitch < L->side + 2.0f) L->pitch = L->side + 2.0f;
 
-    // Center the column vertically so the dock looks deliberate at any height,
-    // and clamp it off the top edge when the canvas is short.
-    float stack = L->pitch * (float)LCT_COUNT - (L->pitch - L->side);
-    L->top = ((float)h - stack) * 0.5f;
-    if (L->top < (float)L->fh) L->top = (float)L->fh;
+    // TOP ALIGNED, under a header (Gary: "give it a title like Tools ... align
+    // top not middle"). A centered column drifts as the window resizes; anchored
+    // to the header the tools are always in the same place.
+    L->titleY = (float)L->fh;
+    L->top    = L->titleY + (float)(L->fh * 2);
 
-    // Short canvas: squeeze pitch before letting the column run off the bottom.
+    // Short canvas: squeeze the pitch before letting the column run off the
+    // bottom, and only then the squares.
+    float stack = L->pitch * (float)LCT_COUNT - (L->pitch - L->side);
     float avail = (float)h - L->top - (float)(L->fh * 3);
     if (stack > avail && avail > (float)LCT_COUNT)
     {
@@ -259,6 +264,16 @@ extern "C" void LiciumCockpitRender(IDirect3DDevice9* dev, int w, int h)
 
     LcRect(dev, w, h, L.x0, 0.0f, L.x1, (float)h, LC_BG);
     LcRect(dev, w, h, L.x0, 0.0f, L.x0 + 2.0f, (float)h, LC_EDGE);
+
+    // Header. A hairline under it does the work a box would, without adding a
+    // second frame inside a strip that is already framed by its own edge.
+    LcText(L"TOOLS", (int)L.x0, (int)L.titleY, (int)L.x1,
+           (int)L.titleY + L.fh + 2, LC_LABEL, DT_CENTER);
+    {
+        float ry = L.titleY + (float)L.fh + 4.0f;
+        float m  = (float)(L.fh / 2);
+        LcRect(dev, w, h, L.x0 + m, ry, L.x1 - m, ry + 1.0f, LC_EMB_LIGHT);
+    }
 
     for (int i = 0; i < LCT_COUNT; i++)
     {
