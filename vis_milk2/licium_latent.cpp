@@ -21,6 +21,7 @@
 
 #include "api.h"
 #include "licium_latent.h"
+#include "licium_cockpit.h"
 #include "licium_res.h"
 #include "licium_oklab.h"
 #include "plugin.h"
@@ -2132,6 +2133,53 @@ extern "C" void LatentSearchOverlayRender(IDirect3DDevice9* dev, int w, int h)
 
     dev->SetRenderState(D3DRS_ZENABLE, TRUE);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+}
+
+// ============================ cockpit tool dispatch ==========================
+// The docked strip (licium_cockpit.cpp) is chrome and owns no state; the tools
+// run here, where the roll selection and the tune overlay already live.
+//
+// Several tools are roll-scoped — they act on the SELECTED roll, which only
+// exists while the browser is open. Rather than half-open the browser behind
+// the user's back, those say so in the dock's status line. The unbuilt slices
+// say that plainly too: a slot that lies about being wired is worse than an
+// empty one.
+
+extern "C" void LiciumCockpitInvoke(int tool)
+{
+    int haveRoll = (g_state != LB_CLOSED && g_count > 0 && g_sel >= 0 && g_sel < g_count);
+
+    switch (tool)
+    {
+    case LCT_COLOR:
+        if (!haveRoll)
+        {
+            LiciumCockpitSetStatus(L"Color: open the browser (x) and select a roll first");
+            return;
+        }
+        LiciumTuneColorOpen(HostGetMainWnd());
+        LiciumCockpitSetStatus(L"Color: knobs open");
+        return;
+
+    case LCT_SEARCH:
+        LatentSearchDialog(HostGetMainWnd());
+        LiciumCockpitSetStatus(L"Search: dialog open");
+        return;
+
+    case LCT_PALETTE:
+    case LCT_GRADE:
+    case LCT_FAMILY:
+        // Roll-scoped tools whose slices are not written yet. Naming the
+        // keyboard route that already works is more use than a dead button.
+        LiciumCockpitSetStatus(haveRoll
+            ? L"not built yet - keyboard for now: p palette, Y/N grade, f family"
+            : L"open the browser (x) and select a roll first");
+        return;
+
+    default:
+        LiciumCockpitSetStatus(L"not built yet");
+        return;
+    }
 }
 
 #endif // MILKDROP_STANDALONE

@@ -148,6 +148,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <WindowsX.h>
 #ifdef MILKDROP_STANDALONE
 #include "host_spout.h"   // publish frames to a Spout sender (standalone only)
+#include "licium_cockpit.h"   // docked tool strip: mouse routing (standalone only)
 #endif
 #pragma comment(lib,"winmm.lib")    // for timeGetTime
 
@@ -2805,6 +2806,12 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 	return 0;
 
 	case WM_MOUSEMOVE:
+#ifdef MILKDROP_STANDALONE
+		// Cockpit hover. Tracked but never consumed: the dock lighting up must
+		// not cost the rest of the shell its mouse-move handling.
+		LiciumCockpitMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+		                       GetWidth(), GetHeight());
+#endif
 		if (m_screenmode==DESKTOP && (m_desktop_dragging==1 || m_desktop_box==1))
 		{
 			m_desktop_drag_curpos.x = GET_X_LPARAM(lParam);
@@ -2842,6 +2849,13 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 		break;
 
 	case WM_LBUTTONUP:
+#ifdef MILKDROP_STANDALONE
+		// Release completes a cockpit press. First in the case, because a press
+		// that started on the dock must finish there whatever mode we are in.
+		if (LiciumCockpitMouseUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+		                         GetWidth(), GetHeight()))
+			return 0;
+#endif
 		if (m_screenmode==DESKTOP)
 		{
 			if (m_desktop_dragging)
@@ -2904,6 +2918,15 @@ LRESULT CPluginShell::PluginShellWindowProc(HWND hWnd, unsigned uMsg, WPARAM wPa
 	case WM_MBUTTONDBLCLK:
 	case WM_RBUTTONDOWN:
 	case WM_RBUTTONUP:
+#ifdef MILKDROP_STANDALONE
+		// The dock gets first refusal on a left press. It MUST return before
+		// the HTCAPTION line below, or every button click drags the window
+		// instead of pressing anything.
+		if (uMsg == WM_LBUTTONDOWN &&
+		    LiciumCockpitMouseDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+		                           GetWidth(), GetHeight()))
+			return 0;
+#endif
 		if (uMsg == WM_MBUTTONDBLCLK && m_frame > 0)
 		{
 			ToggleDesktop();

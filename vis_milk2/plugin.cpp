@@ -502,6 +502,7 @@ Order of Function Calls
 #include "licium_bandit.h" // standalone-only; no-op in the Winamp DLL build
 #include "licium_palettes.h" // standalone-only; no-op in the Winamp DLL build
 #include "licium_latent.h" // standalone-only; no-op in the Winamp DLL build
+#include "licium_cockpit.h" // docked tool strip (standalone-only, same gating)
 #include "licium_settings.h" // standalone-only; no-op in the Winamp DLL build
 #include <assert.h>
 #include <locale.h>
@@ -4574,6 +4575,10 @@ void CPlugin::MyRenderUI(
     // Latent search progress: title text in every phase; the corner bar only
     // while the canvas is not being measured (triage photographs these frames).
     LatentSearchOverlayRender(GetDevice(), GetWidth(), GetHeight());
+    // Tune cockpit: the docked tool strip. Permanent chrome, so unlike the two
+    // above it is drawn unconditionally - and drawn LAST of the three so its
+    // column is never covered by a modal that happens to reach the right edge.
+    LiciumCockpitRender(GetDevice(), GetWidth(), GetHeight());
 #endif
 
     // 1. render text in upper-right corner - EXCEPT USER MESSAGE - it goes last b/c it draws a box under itself
