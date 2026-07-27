@@ -3628,6 +3628,26 @@ void CPlugin::PassBuffers_Release()
 // Licium shaping-curve LUTs
 //----------------------------------------------------------------------
 
+// IEEE 754 binary32 -> binary16, round-to-nearest. Written out rather than
+// taken from D3DX because every D3DX entry point in this file is resolved
+// dynamically at runtime, and a table bake should not depend on that having
+// succeeded. Only ever fed values in [0,1], so denormals flushing to zero
+// costs nothing (they start below 6e-5) and infinity/NaN cannot arise.
+static unsigned short FloatToHalf(float f)
+{
+    union { float f; unsigned int u; } in;
+    in.f = f;
+    unsigned int u    = in.u;
+    unsigned int sign = (u >> 16) & 0x8000;
+    int          exp  = (int)((u >> 23) & 0xFF) - 127 + 15;
+    unsigned int mant = (u & 0x007FFFFF) + 0x00001000;   // round to nearest
+
+    if (mant & 0x00800000) { mant = 0; exp++; }          // rounding carried out
+    if (exp <= 0)  return (unsigned short)sign;          // underflow -> +/-0
+    if (exp >= 31) return (unsigned short)(sign | 0x7C00);
+    return (unsigned short)(sign | ((unsigned int)exp << 10) | (mant >> 13));
+}
+
 void CPlugin::CurveLuts_Ensure()
 {
     LPDIRECT3DDEVICE9 lpDevice = GetDevice();
@@ -3646,16 +3666,65 @@ void CPlugin::CurveLuts_Ensure()
         int w = LICIUM_CURVE_LUT_W;
         int h = 1;
 
+        // HALF-FLOAT, falling back to 8-bit. An 8-bit entry can only land on one
+        // of 256 rungs, and a straight line from 0 to 1 across this table rises
+        // by exactly one rung per cell - so anywhere a curve is GENTLER than
+        // linear, consecutive entries round to the same rung and the shader
+        // interpolates between two identical values, i.e. a genuinely flat
+        // segment. Since every curve that is steep somewhere must be gentle
+        // somewhere else, 8 bits GUARANTEES plateaus no matter how smooth the
+        // math is. (Measured under the v1 family: 69.6% of curves held a flat
+        // run of 8+ cells.) fp16 resolves ~1/2048 or finer, which ends the
+        // rounding-induced flats outright; what remains is only flatness the
+        // curve actually has.
+        //
+        // fp16 and not fp32: the memory is nothing either way (2KB vs 4KB per
+        // slot), but fp16 filtering is universally supported where fp32
+        // filtering is not, and losing FILTERING would cost a hard staircase -
+        // far worse than the precision it would buy. The extra digits could not
+        // reach the eye regardless; the display output is 8-bit.
+        //
         // MANAGED, not DEFAULT: these are CPU-filled data tables, never render
         // targets, so the runtime keeps its own copy and a device reset restores
         // them for free - no reset handling anywhere.
-        if (lpDevice->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_lpCurveLut[n], NULL) != D3D_OK)
+        // The device must agree to FILTER the format, not merely hold it - an
+        // unfiltered LUT is a staircase, which is worse than the 8-bit table it
+        // would be replacing. Asked through the device rather than the shell's
+        // DXContext, which is private to CPluginShell.
+        m_bCurveLutHalf[n] = 0;
+        D3DFORMAT curveFmt = D3DFMT_A8R8G8B8;
         {
-            // out of memory: run without this slot. Its sampler binds nothing,
-            // so a shader referencing it reads black - i.e. the curve flattens
-            // to zero rather than the preset failing to load.
-            m_lpCurveLut[n] = NULL;
-            continue;
+            IDirect3D9* pD3D = NULL;
+            D3DDEVICE_CREATION_PARAMETERS cp;
+            if (lpDevice->GetDirect3D(&pD3D) == D3D_OK && pD3D)
+            {
+                if (lpDevice->GetCreationParameters(&cp) == D3D_OK &&
+                    pD3D->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType,
+                                            GetBackBufFormat(), D3DUSAGE_QUERY_FILTER,
+                                            D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F) == D3D_OK)
+                {
+                    curveFmt = D3DFMT_A16B16G16R16F;
+                    m_bCurveLutHalf[n] = 1;
+                }
+                pD3D->Release();   // GetDirect3D AddRefs
+            }
+        }
+
+        if (lpDevice->CreateTexture(w, h, 1, 0, curveFmt, D3DPOOL_MANAGED, &m_lpCurveLut[n], NULL) != D3D_OK)
+        {
+            // Half-float refused after the caps query said yes: take the 8-bit
+            // table rather than run the slot dead.
+            m_lpCurveLut[n]    = NULL;
+            m_bCurveLutHalf[n] = 0;
+            if (curveFmt == D3DFMT_A8R8G8B8 ||
+                lpDevice->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_lpCurveLut[n], NULL) != D3D_OK)
+            {
+                // out of memory: run without this slot. Its sampler binds
+                // nothing, so a shader referencing it reads black - i.e. the
+                // curve flattens to zero rather than the preset failing to load.
+                m_lpCurveLut[n] = NULL;
+                continue;
+            }
         }
 
         m_nCurveLutSeed[n] = 0;     // nothing baked yet
@@ -3715,15 +3784,33 @@ void CPlugin::CurveLuts_Update(CState* pState)
         if (m_lpCurveLut[n]->LockRect(0, &lr, NULL, 0) != D3D_OK)
             continue;
 
-        unsigned int* pRow = (unsigned int*)lr.pBits;
-        for (int i=0; i<LICIUM_CURVE_LUT_W; i++)
+        if (m_bCurveLutHalf[n])
         {
-            int v = (int)(table[i] * 255.0f + 0.5f);
-            if (v < 0)   v = 0;
-            if (v > 255) v = 255;
-            // Replicated across RGB so the shader can read .x, .r or .rgb and
-            // get the same number however the emitter happens to spell it.
-            pRow[i] = D3DCOLOR_ARGB(255, v, v, v);
+            // A16B16G16R16F: four halves per entry, value replicated across RGB
+            // (and 1.0 in A) for the same reason the 8-bit path replicates -
+            // the shader may spell the read .x, .r or .rgb.
+            unsigned short* pRow = (unsigned short*)lr.pBits;
+            for (int i=0; i<LICIUM_CURVE_LUT_W; i++)
+            {
+                unsigned short hv = FloatToHalf(table[i]);
+                pRow[i*4 + 0] = hv;                  // R
+                pRow[i*4 + 1] = hv;                  // G
+                pRow[i*4 + 2] = hv;                  // B
+                pRow[i*4 + 3] = FloatToHalf(1.0f);   // A
+            }
+        }
+        else
+        {
+            unsigned int* pRow = (unsigned int*)lr.pBits;
+            for (int i=0; i<LICIUM_CURVE_LUT_W; i++)
+            {
+                int v = (int)(table[i] * 255.0f + 0.5f);
+                if (v < 0)   v = 0;
+                if (v > 255) v = 255;
+                // Replicated across RGB so the shader can read .x, .r or .rgb and
+                // get the same number however the emitter happens to spell it.
+                pRow[i] = D3DCOLOR_ARGB(255, v, v, v);
+            }
         }
 
         m_lpCurveLut[n]->UnlockRect(0);

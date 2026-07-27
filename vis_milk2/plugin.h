@@ -573,6 +573,7 @@ public:
         // D3DPOOL_MANAGED, so they also survive a device reset untouched.
         IDirect3DTexture9 *m_lpCurveLut[LICIUM_NUM_CURVES];
         unsigned int       m_nCurveLutSeed[LICIUM_NUM_CURVES];  // seed currently baked into each slot; the cache key
+        int                m_bCurveLutHalf[LICIUM_NUM_CURVES];  // slot got A16B16G16R16F (not the 8-bit fallback)
 
         IDirect3DTexture9 *m_lpDDSTitle;    // CAREFUL: MIGHT BE NULL (if not enough mem)!
         int               m_nTitleTexSizeX, m_nTitleTexSizeY;
