@@ -64,13 +64,18 @@
 //     tree under LX8 - only the emitted exposure constant differs. That makes
 //     an LX7->LX8 rescue trivial if one is ever wanted (unlike LX4, which was
 //     stranded by an alphabet insertion).
-//   * LX8 -> LX9 (2026-07-28, exposure floor): same auto-exposure, but the p90
-//     anchor gained a MEDIAN FLOOR - see ExposureOfTree. Gary's one quality
-//     complaint about LX8 was "unfortunately overfaint", and the measurement
-//     says he was right. Alphabet UNTOUCHED again; an LX8 seed grows the
-//     identical tree under LX9 and only the exposure constant differs, so this
-//     is the same trivial-rescue shape as LX7->LX8.
-#define LX_GENVER      9
+//   * LX8 -> LX9 (2026-07-28, exposure floor): the p90 anchor gained an
+//     unconditional MEDIAN FLOOR. Gary graded the 14 rolls it moved and
+//     rejected 13 - see ExposureOfTree. LX9 shipped and is superseded; its 14
+//     emitted rolls stay on disk and still browse (nothing is ever deleted).
+//   * LX9 -> LX10 (2026-07-28, spike rescue): the floor now only engages when
+//     p90/p50 says p90 is measuring a DIV spike rather than the picture. That
+//     keeps the one roll LX9 fixed and reverts the thirteen it broke, so LX10
+//     is LX8 plus a narrow rescue. Alphabet UNTOUCHED throughout - an LX8 seed
+//     grows the identical tree under all three and only the exposure constant
+//     differs, which is why bumping rather than patching LX9 in place costs
+//     nothing: LX9 ids must keep reproducing.
+#define LX_GENVER      10
 #define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
                                 // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
@@ -542,8 +547,9 @@ static float ApplyLens(const Lens& L, float f, float expo)
 //   * p90, NOT max. A DIV node with the 0.1 safe-div epsilon can spike enormous
 //     on a measure-zero set, and dividing by that would darken the whole roll to
 //     protect one pixel. Letting the top decile clip is where contrast lives.
-//   * ...but p90 alone describes only the TAIL, and LX9 adds a MEDIAN FLOOR so
-//     the BULK cannot be left in the dark. Both anchors, max of the two.
+//   * ...and on rare trees p90 is ITSELF the spike, which LX10 catches with a
+//     p90/p50 test and rescues via the median. Narrow on purpose: LX9 applied
+//     that rescue to every roll and Gary rejected 13 of the 14 it moved.
 //   * fb IS SWEPT OVER [0,1] because that is its range by construction (it is a
 //     luma of the previous frame). That is what makes this non-circular - the
 //     exposure does not need the settled field, which needs the lens, which
@@ -552,7 +558,8 @@ static float ApplyLens(const Lens& L, float f, float expo)
 //     so the CPU screens grade with the exact constant the shader will use.
 #define LX_EXPO_GRID  16
 #define LX_EXPO_NFB   4
-#define LX_EXPO_MEDIAN_TARGET 0.35f   // LX9: where the bulk must land, at worst
+#define LX_EXPO_MEDIAN_TARGET 0.35f   // LX9: where a rescued bulk is put
+#define LX_EXPO_SPIKE_RATIO   20.0f   // LX10: p90/p50 above this = p90 is a spike
 
 static int LicCmpFloatAsc(const void* a, const void* b)
 {
@@ -599,39 +606,55 @@ static float ExposureOfTree(const Tree* t)
 
     float e = 1.0f / p90;
 
-    // LX9 MEDIAN FLOOR. Anchoring on p90 alone pins the TAIL to the clamp
-    // ceiling, which says nothing about where the BULK lands. On a heavy-tailed
-    // field the two are far apart, and the bulk is what the eye reads as
-    // brightness. Gary, on an LX8 roll the p90 rule attenuated to 0.1499x:
-    // "unfortunately overfaint". Measured on that roll - p50 0.606, p90 6.67 -
-    // so the median landed at 0.091. Nine percent gray IS overfaint; the rule
-    // was working as designed and the design was wrong.
+    // LX10 SPIKE RESCUE. This started life in LX9 as an unconditional median
+    // floor and Gary's eye killed it, so the reasoning is kept in full - the
+    // negative result is the valuable part.
     //
-    // Measured over all 67 LX8 rolls, p50*e under the shipped rule:
-    // p25 0.100, median 0.433, p75 1.000. Eighteen rolls land under 0.15.
+    // The LX9 argument was: p90 pins the TAIL to the clamp ceiling and says
+    // nothing about where the BULK lands, so on a heavy-tailed field the bulk
+    // can sit near black. That was measured and true. Gary's overfaint roll had
+    // p50 0.606 / p90 6.67, so the median landed at 0.091, and lifting it to
+    // 0.35 was a 3.85x change. Fourteen of the 67 LX8 rolls moved.
     //
-    // The fix is a FLOOR, not a swap. Swapping the anchor to the median was
-    // tried on paper first and is a clear regression: 23 of the 67 are binary
-    // LT/floor fields whose median already sits at the ceiling, and a
-    // median->k rule would DARKEN all 23 by k. Taking the max of the two
-    // anchors instead is monotone - measured over the same 67, zero rolls get
-    // darker at any k in [0.2, 0.5] - so this can only ever lift a field that
-    // the p90 rule left too dark, and never touches one it already suited.
+    // THIRTEEN OF THE FOURTEEN GOT WORSE. Gary, having graded all of them:
+    // "the only interesting one was 02118C49, the rest wash out on the dark or
+    // light color or just stop moving." The mechanism is not mysterious and it
+    // was visible in the sweep numbers I chose to accept: lifting exposure
+    // pushes field into the Sat() clamp, and a CLAMPED REGION HAS NO GRADIENT
+    // AND NO TIME VARIATION. That is what "stop moving" is - not a dimmer
+    // picture but a DEAD one, the LX8 flats failure arriving from the bright
+    // side. Brightness was never the complaint worth optimising; contrast and
+    // motion were, and the clamp destroys both.
     //
-    // ATTENUATE-ONLY SURVIVES: the 1.0 cap below still applies to the result,
-    // so the LX8 A/B finding (amplification made both test rolls worse) is not
-    // being relitigated. The floor raises e toward 1.0, never past it.
+    // What survived is the ONE roll that improved, and it is a different animal
+    // rather than a stronger case of the same thing. Its p90 is 1037 against a
+    // p50 of 4.256 - a ratio of 244, where the next-worst of the fourteen is 11
+    // and the p95 across all 53 rolls with a usable median is 7.2. Its 1/p90
+    // did not merely attenuate, it hit the 1e-3 clamp below. Gary had PASSED it
+    // under LX8 and LIKED it under LX9.
     //
-    // k = 0.35 from the sweep. Over the 67: k=0.2 lifts 7 rolls, 0.35 lifts 14,
-    // 0.5 lifts 24 - but 0.5 pushes 63 of 67 into clipping their top decile,
-    // which is the LX8 flats failure coming back the other way. At 0.35 the
-    // >=25%-clip count moves 36 -> 40. Gary's roll goes 0.1499 -> 0.5772.
+    // So the real defect was never "p90 describes the tail". It is that p90 is
+    // ITSELF SPIKE-CONTAMINATED on rare trees - the exact failure the "p90, not
+    // max" rule above exists to prevent, one order of magnitude further out. A
+    // DIV node against the 0.1 safe-div epsilon can spike over a set broad
+    // enough to reach the top decile, and then the anchor is measuring the
+    // spike instead of the picture. p90/p50 detects precisely that, because a
+    // field whose top decile is 244x its middle is not a picture with a bright
+    // part.
     //
-    // p50 <= 0 is SKIPPED, not floored: 14 of the 67 have an exactly-zero
-    // median (half the field is dead), where "put the median at 0.35" both
-    // divides by zero and means nothing. Those keep the p90 rule.
+    // Threshold 20: above the 7.2 p95 and the 11 next-worst, far below 244.
+    // Every value in [15, 100] selects the identical set on this data, so the
+    // exact number is not load-bearing. n=1 above it, and that is worth saying
+    // plainly - but the count that matters is 1 fixed against 13 broken, which
+    // is what says GATE rather than TUNE.
+    //
+    // Still MONOTONE (max, never a swap: 23 of the 67 are binary LT/floor
+    // fields whose median already sits at the ceiling, and a median->k rule
+    // would darken all 23 by k) and still ATTENUATE-ONLY (the 1.0 cap below).
+    // p50 <= 0 skips: 14 of the 67 have an exactly-zero median, where "put the
+    // median at 0.35" divides by zero and means nothing.
     float p50 = mag[(int)(0.50f * (n - 1))];
-    if (p50 > 1e-4f)
+    if (p50 > 1e-4f && p90 > LX_EXPO_SPIKE_RATIO * p50)
     {
         float floorE = LX_EXPO_MEDIAN_TARGET / p50;
         if (floorE > e) e = floorE;
