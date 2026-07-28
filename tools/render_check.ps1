@@ -33,6 +33,22 @@ $OutDir     = Join-Path $EnvDir "out\render_check"
 if (-not (Test-Path $Exe)) { throw "Licium.exe not found: $Exe" }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
+# HARD GUARD - learned the expensive way, 2026-07-28.
+# EVERY --worker instance publishes under the SAME Spout sender name
+# ('LiciumTriage'), so two of them are indistinguishable to spout_grab. This
+# script ran while a deferred latent_triage.ps1 woke up, and the two fought over
+# the sender: triage logged 5 healthy LX3 rolls as "grabfail" (mean 0.0000,
+# motion 0.00000) and then died. Verdicts are later-wins so nothing was lost
+# permanently, but the run was wasted and the file needed a -Redo pass.
+# Refusing to start is the only reliable fix while the sender name is shared.
+$triage = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match 'latent_(triage|search)\.ps1' })
+if ($triage.Count -gt 0) {
+    throw ("refusing to run: latent_triage/latent_search is active (pid {0}). " -f ($triage[0].ProcessId)) +
+          "Both use --worker, which shares the 'LiciumTriage' Spout sender, and concurrent grabs poison each other. " +
+          "Wait for it to finish, or stop it first."
+}
+
 Add-Type -Name RC -Namespace RChk -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
 public delegate bool EnumProc(IntPtr h, IntPtr l);
