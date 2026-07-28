@@ -2248,6 +2248,63 @@ void CPluginShell::AnalyzeNewSound(unsigned char *pWaveL, unsigned char *pWaveR)
 		for (i=0; i<3; i++)
 		{
 			// m_sound.avg[i]
+#ifdef MILKDROP_STANDALONE
+			// ASYMMETRIC SPRING ENVELOPE (Licium).
+			//
+			// The original is a per-frame lerp with retention 0.2 rising / 0.5
+			// falling. Both are fast — 0.5 at the 14fps reference is roughly a
+			// one-frame half-life — so a level that drops goes dark almost
+			// immediately. That short cutoff is what reads as flashing: the
+			// MOTION is smooth, but everything driven by *_att snaps.
+			//
+			// Replaced with a damped spring, asymmetric in both stiffness and
+			// damping:
+			//   rising  - stiff and UNDERdamped, so it overshoots the target and
+			//             settles back. That overshoot is the bounce.
+			//   falling - soft and critically damped, so it coasts down over
+			//             most of a second with no wobble: the fade tail.
+			//
+			// Semi-implicit Euler. dt is clamped so a stalled frame cannot make
+			// the spring explode, and the natural frequency is capped against dt
+			// for the same reason.
+			//
+			// This changes no preset semantics and touches no .milk file — it is
+			// the envelope every roll's *_att values were always read through.
+			{
+				const float ATTACK_OMEGA  = 46.0f;  // rad/s: reaches target in ~40ms
+				const float ATTACK_ZETA   = 0.34f;  // <1 = overshoot (the bounce)
+				const float RELEASE_OMEGA = 6.5f;   // rad/s: ~0.5s coast to dark
+				const float RELEASE_ZETA  = 1.00f;  // critical: tail, never wobble
+				const float MAX_OVERSHOOT = 1.35f;  // ceiling on the bounce peak
+
+				float dt = (m_fps > 0.0001f) ? (1.0f / m_fps) : (1.0f / 60.0f);
+				if (dt < 1.0f/240.0f) dt = 1.0f/240.0f;
+				if (dt > 1.0f/15.0f)  dt = 1.0f/15.0f;
+
+				float x = m_sound.avg[ch][i];
+				float v = m_sound.avg_vel[ch][i];
+				float target = m_sound.imm[ch][i];
+
+				bool rising = (target > x);
+				float omega = rising ? ATTACK_OMEGA : RELEASE_OMEGA;
+				float zeta  = rising ? ATTACK_ZETA  : RELEASE_ZETA;
+
+				// keep omega*dt in the stable range for explicit integration
+				const float maxOmega = 0.7f / dt;
+				if (omega > maxOmega) omega = maxOmega;
+
+				v += (omega*omega*(target - x) - 2.0f*zeta*omega*v) * dt;
+				x += v * dt;
+
+				// the bounce is wanted, a runaway spike is not
+				float ceiling = target * MAX_OVERSHOOT;
+				if (x > ceiling && x > 0.0f) { x = ceiling; if (v > 0.0f) v = 0.0f; }
+				if (x < 0.0f)                { x = 0.0f;    if (v < 0.0f) v = 0.0f; }
+
+				m_sound.avg[ch][i]     = x;
+				m_sound.avg_vel[ch][i] = v;
+			}
+#else
 			{
 				float avg_mix;
 				if (m_sound.imm[ch][i] > m_sound.avg[ch][i])
@@ -2256,6 +2313,7 @@ void CPluginShell::AnalyzeNewSound(unsigned char *pWaveL, unsigned char *pWaveR)
 					avg_mix = AdjustRateToFPS(0.5f, 14.0f, m_fps);
 				m_sound.avg[ch][i] = m_sound.avg[ch][i]*avg_mix + m_sound.imm[ch][i]*(1-avg_mix);
 			}
+#endif
 
 			// m_sound.med_avg[i]
 			// m_sound.long_avg[i]

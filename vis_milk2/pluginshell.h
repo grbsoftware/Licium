@@ -60,6 +60,9 @@ typedef struct
     float       infinite_avg[2][3];   // bass, mids, treble: winamp's average output levels. (1)
     float   fWaveform[2][576];             // Not all 576 are valid! - only NUM_WAVEFORM_SAMPLES samples are valid for each channel (note: NUM_WAVEFORM_SAMPLES is declared in shell_defines.h)
     float   fSpectrum[2][NUM_FREQUENCIES]; // NUM_FREQUENCIES samples for each channel (note: NUM_FREQUENCIES is declared in shell_defines.h)
+#ifdef MILKDROP_STANDALONE
+    float   avg_vel[2][3];            // spring velocity behind avg[][]; see the envelope block in pluginshell.cpp
+#endif
 } td_soundinfo;                    // ...range is 0 Hz to 22050 Hz, evenly spaced.
 
 class CPluginShell
