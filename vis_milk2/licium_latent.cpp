@@ -85,15 +85,301 @@ static const wchar_t* VerdictShort(int v)
 }
 
 #define LATENT_ID_LEN   20    // "LX1-XXXXXXXX" + headroom for later genvers
-#define LATENT_NTAGS    6
+// ---- TAG VOCABULARY ---------------------------------------------------------
+// Tags used to be six hardcoded adjectives. The usage data killed that idea:
+// across the first 28 taggings, "watery" and "sparkly" were used ZERO times and
+// the single most-used tag was "???" (8) - the escape hatch meaning "none of
+// these fit". Five adjectives and a shrug were guessed before anyone knew Gary's
+// vocabulary, which is the same a-priori mistake that made the swarm descriptors
+// score 4/8 against his perception. His words are the ground truth.
+//
+// So the tag set is now DERIVED FROM HIS OWN DESCRIPTIONS. Describing a roll
+// (D/Enter) tokenises the note into latent_vocab.txt; the number keys bind to
+// the top terms and relabel themselves as the vocabulary grows. A term nobody
+// uses sinks; a term used constantly rises to a key. There is nothing to
+// memorise because the legend always shows the live words.
+//
+// STORAGE IS UNCHANGED AND BACK-COMPATIBLE: latent_tags.txt has always stored
+// tags BY NAME ("LX8-0264A56B ??? 1"), so every existing line still loads - the
+// old six simply become the first vocabulary entries, carrying their counts.
+#define LATENT_MAX_VOCAB 64      // ceiling on distinct terms (tags[] is per-roll)
+#define LATENT_TERM_LEN  24
+#define LATENT_NKEYS     6       // number keys 1-6 bind to the top 6 terms
+#define LATENT_NTAGS    LATENT_MAX_VOCAB
 // 512 -> nMaxLen 511, which is the engine's documented waitstring ceiling
 // ("can't be more than 511", plugin.h td_waitstr). Was 256, and Gary's very
 // first real description ran ~180 chars, so the old cap was about two sentences
 // from cutting him off mid-thought. Every buffer below is sized off this define.
 #define LATENT_NOTE_LEN 512
 
-static const char* TAG_NAMES[LATENT_NTAGS] =
-    { "organic", "geometric", "glitchy", "watery", "sparkly", "???" };
+// count  = times the term appeared in a DESCRIPTION. Persisted in latent_vocab.txt.
+// tagUse = times it is currently applied as a tag. RECOMPUTED from latent_tags.txt
+//          on every browser open and never persisted - persisting it would
+//          double-count on the next launch, since LoadTags runs again.
+// Ranking uses the sum: a term earns a key by being written OR by being applied.
+struct VocabTerm { char term[LATENT_TERM_LEN]; int count; int tagUse; };
+static VocabTerm g_vocab[LATENT_MAX_VOCAB];
+static int       g_vocabCount = 0;
+static int       g_keyTerm[LATENT_NKEYS];   // number key -> vocab index (-1 = unbound)
+
+// Thesaurus: plain text, hand-editable, applied AFTER stemming.
+// "canonical alias alias ..." per line. The engine only does the lookup - it
+// cannot judge similarity, so the GROUPINGS are authored (mined from the notes
+// and edited by Gary). Keeping the intelligence in a data file rather than the
+// code is what lets it improve without a rebuild.
+struct ThesEntry { char canon[LATENT_TERM_LEN]; char alias[LATENT_TERM_LEN]; };
+static ThesEntry g_thes[192];
+static int       g_thesCount = 0;
+
+// Words that are never a tag. Beyond ordinary stopwords this kills DIGITS and
+// number-words, because of Gary's own objection to his first description:
+// "2 rows roughly 8 wide is too vague, where else would I use that, and after
+// looking at 1000s of results will I ever remember?" - exactly right. A count
+// describes ONE roll and can never recur, so it is per-roll memory (the note
+// keeps it) but never vocabulary. Frequency would sink such terms anyway; this
+// just stops them cluttering the table on the way down.
+static const char* VOCAB_STOP[] = {
+    "the","a","an","and","or","but","of","to","in","on","at","is","are","was",
+    "were","it","its","this","that","these","those","with","from","as","by",
+    "for","into","onto","over","under","then","than","they","them","there",
+    "here","some","very","really","quite","roughly","about","around","almost",
+    "mostly","kind","sort","like","looks","look","looking","see","seems","seem",
+    "unfortunately","maybe","probably","think","lot","lots","bit","little",
+    "one","two","three","four","five","six","seven","eight","nine","ten",
+    "row","rows","wide","tall","per","each","form","forms","formed","have","has",
+    "get","gets","go","goes","be","been","being","i","my","me","you","its","not",
+    0
+};
+
+static int VocabIsStop(const char* w)
+{
+    if (!w[0] || w[1] == 0 || w[2] == 0) return 1;      // <3 chars: never a tag
+    for (int i = 0; w[i]; i++) if (w[i] >= '0' && w[i] <= '9') return 1;  // digits
+    for (int i = 0; VOCAB_STOP[i]; i++) if (!strcmp(w, VOCAB_STOP[i])) return 1;
+    return 0;
+}
+
+// Light stemming - deliberately dumb and inspectable. "pulsing"/"pulses"/"pulse"
+// all land on "puls"; "boxes" -> "box". Length guards stop short words being
+// butchered ("bed" must not become "b").
+static void VocabStem(char* w)
+{
+    int n = (int)strlen(w);
+    if      (n > 5 && !strcmp(w + n - 3, "ing")) { w[n - 3] = 0; n -= 3; }
+    else if (n > 5 && !strcmp(w + n - 3, "ies")) { strcpy(w + n - 3, "y"); n -= 2; }
+    else if (n > 4 && !strcmp(w + n - 2, "ed"))  { w[n - 2] = 0; n -= 2; }
+    else if (n > 4 && !strcmp(w + n - 2, "es"))  { w[n - 2] = 0; n -= 2; }
+    else if (n > 3 && w[n - 1] == 's' && w[n - 2] != 's') { w[n - 1] = 0; n -= 1; }
+    // "shimmerr"-style doubled tail left by stripping "-ing" from "shimmering"
+    if (n > 3 && w[n - 1] == w[n - 2] && w[n - 1] != 's' && w[n - 1] != 'e')
+        w[n - 1] = 0;
+}
+
+static void VocabCanon(char* w)
+{
+    for (int i = 0; i < g_thesCount; i++)
+        if (!strcmp(w, g_thes[i].alias)) { strcpy(w, g_thes[i].canon); return; }
+}
+
+static int VocabFind(const char* w)
+{
+    for (int i = 0; i < g_vocabCount; i++) if (!strcmp(g_vocab[i].term, w)) return i;
+    return -1;
+}
+
+static int VocabFindOrAdd(const char* w)
+{
+    int i = VocabFind(w);
+    if (i >= 0) return i;
+    if (g_vocabCount >= LATENT_MAX_VOCAB) return -1;
+    strncpy(g_vocab[g_vocabCount].term, w, LATENT_TERM_LEN - 1);
+    g_vocab[g_vocabCount].term[LATENT_TERM_LEN - 1] = 0;
+    g_vocab[g_vocabCount].count  = 0;
+    g_vocab[g_vocabCount].tagUse = 0;
+    return g_vocabCount++;
+}
+
+// Number keys bind to the most-used terms. "???" is deliberately excluded: it
+// means "no term fits", which in this design is an instruction to DESCRIBE the
+// roll, not a label worth a dedicated key - and by count it would otherwise
+// squat on key 1 forever.
+static int VocabRank(int i) { return g_vocab[i].count + g_vocab[i].tagUse; }
+
+static void VocabRebindKeys(void)
+{
+    for (int k = 0; k < LATENT_NKEYS; k++) g_keyTerm[k] = -1;
+    char used[LATENT_MAX_VOCAB] = { 0 };
+    for (int k = 0; k < LATENT_NKEYS; k++)
+    {
+        int best = -1;
+        for (int i = 0; i < g_vocabCount; i++)
+        {
+            if (used[i] || !strcmp(g_vocab[i].term, "???")) continue;
+            if (best < 0 || VocabRank(i) > VocabRank(best) ||
+                (VocabRank(i) == VocabRank(best) &&
+                 strcmp(g_vocab[i].term, g_vocab[best].term) < 0))
+                best = i;
+        }
+        if (best < 0) break;
+        used[best] = 1;
+        g_keyTerm[k] = best;
+    }
+}
+
+static void VocabPath(wchar_t* out, const wchar_t* name)
+{
+    swprintf(out, L"%s%s", g_plugin.m_szMilkdrop2Path, name);
+}
+
+static void VocabLoadThesaurus(void)
+{
+    wchar_t path[MAX_PATH]; VocabPath(path, L"latent_thesaurus.txt");
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f))
+    {
+        if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
+        char canon[LATENT_TERM_LEN] = { 0 }, alias[LATENT_TERM_LEN];
+        const char* p = line;
+        int got = 0;
+        while (*p && g_thesCount < (int)(sizeof(g_thes) / sizeof(g_thes[0])))
+        {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            int n = 0; char w[LATENT_TERM_LEN];
+            while (*p && *p != ' ' && *p != '\t' && *p != ',' &&
+                   *p != '\r' && *p != '\n' && n < LATENT_TERM_LEN - 1)
+                w[n++] = (char)tolower((unsigned char)*p++);
+            w[n] = 0;
+            if (!n) break;
+            if (!got) { strcpy(canon, w); got = 1; }
+            else
+            {
+                strcpy(g_thes[g_thesCount].canon, canon);
+                strcpy(g_thes[g_thesCount].alias, w);
+                g_thesCount++;
+            }
+        }
+    }
+    fclose(f);
+}
+
+static void VocabSave(void)
+{
+    wchar_t path[MAX_PATH]; VocabPath(path, L"latent_vocab.txt");
+    FILE* f = _wfopen(path, L"wb");
+    if (!f) return;
+    fputs("# Licium tag vocabulary - term<TAB>count, most-used first.\r\n"
+          "# Built from your own descriptions (D in the X browser). The top "
+          "terms bind to the number keys.\r\n"
+          "# Safe to hand-edit: delete a line to drop a term, edit a count to "
+          "promote or demote one.\r\n", f);
+    // Most-used first: the file doubles as the report on what the vocabulary
+    // actually is, so the useful terms belong at the top where they get read.
+    char done[LATENT_MAX_VOCAB] = { 0 };
+    for (int k = 0; k < g_vocabCount; k++)
+    {
+        int best = -1;
+        for (int i = 0; i < g_vocabCount; i++)
+        {
+            if (done[i]) continue;
+            if (best < 0 || g_vocab[i].count > g_vocab[best].count ||
+                (g_vocab[i].count == g_vocab[best].count &&
+                 strcmp(g_vocab[i].term, g_vocab[best].term) < 0))
+                best = i;
+        }
+        if (best < 0) break;
+        done[best] = 1;
+        fprintf(f, "%s\t%d\r\n", g_vocab[best].term, g_vocab[best].count);
+    }
+    fclose(f);
+}
+
+// Tokenise one description into the vocabulary. Free text in, terms out - the
+// input is never constrained, because constraining it is what would put my
+// guesses back in place of Gary's words.
+static void VocabIngestNote(const wchar_t* note)
+{
+    char w[LATENT_TERM_LEN];
+    int n = 0;
+    for (const wchar_t* p = note; ; p++)
+    {
+        wchar_t c = *p;
+        int isAl = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+                   (c >= L'0' && c <= L'9');
+        if (isAl && n < LATENT_TERM_LEN - 1)
+            w[n++] = (char)tolower((unsigned char)c);
+        else
+        {
+            w[n] = 0;
+            if (n)
+            {
+                if (!VocabIsStop(w))
+                {
+                    VocabStem(w);
+                    VocabCanon(w);
+                    if (!VocabIsStop(w))
+                    {
+                        int i = VocabFindOrAdd(w);
+                        if (i >= 0) g_vocab[i].count++;
+                    }
+                }
+            }
+            n = 0;
+            if (!c) break;
+        }
+    }
+}
+
+static void VocabIngestAllNotes(void)
+{
+    wchar_t path[MAX_PATH]; VocabPath(path, L"latent_notes.txt");
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+    char line[LATENT_NOTE_LEN * 3 + 64];
+    while (fgets(line, sizeof(line), f))
+    {
+        char* tab = strchr(line, '\t');
+        if (!tab) continue;
+        wchar_t wide[LATENT_NOTE_LEN * 2];
+        MultiByteToWideChar(CP_UTF8, 0, tab + 1, -1, wide, LATENT_NOTE_LEN * 2);
+        wide[LATENT_NOTE_LEN * 2 - 1] = 0;
+        VocabIngestNote(wide);
+    }
+    fclose(f);
+}
+
+// latent_vocab.txt is the source of truth for counts once it exists. On a FIRST
+// run it will not, so the whole note history is mined once and written out -
+// that is what stops counts doubling on every launch.
+static void VocabLoad(void)
+{
+    VocabLoadThesaurus();
+
+    wchar_t path[MAX_PATH]; VocabPath(path, L"latent_vocab.txt");
+    FILE* f = _wfopen(path, L"rb");
+    if (f)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), f))
+        {
+            if (line[0] == '#') continue;
+            char t[LATENT_TERM_LEN]; int c;
+            if (sscanf(line, "%23s %d", t, &c) == 2)
+            {
+                int i = VocabFindOrAdd(t);
+                if (i >= 0) g_vocab[i].count = c;
+            }
+        }
+        fclose(f);
+    }
+    else
+    {
+        VocabIngestAllNotes();
+        VocabSave();
+    }
+    VocabRebindKeys();
+}
 
 struct LatentRoll
 {
@@ -238,15 +524,33 @@ static void LoadTags(void)
     if (!f) return;
     char idA[LATENT_ID_LEN], tag[32]; int v;
     char line[160];
+    // tagUse is derived state, so clear it before the pass - LoadTags can run
+    // more than once per process and this must not accumulate.
+    for (int i = 0; i < g_vocabCount; i++) g_vocab[i].tagUse = 0;
     while (fgets(line, sizeof(line), f))
         if (sscanf(line, "%19s %31s %d", idA, tag, &v) == 3)
         {
             LatentRoll* r = FindRollA(idA);
             if (!r) continue;
-            for (int t = 0; t < LATENT_NTAGS; t++)
-                if (!strcmp(tag, TAG_NAMES[t])) { r->tags[t] = (unsigned char)(v ? 1 : 0); break; }
+            // Tags have always been stored BY NAME, so an unknown term is not an
+            // error - it is a vocabulary entry we have not met yet. This is what
+            // makes the switch from six fixed adjectives to a live vocabulary
+            // fully back-compatible: the old names load as ordinary terms.
+            int t = VocabFindOrAdd(tag);
+            if (t < 0) continue;
+            // The file is later-wins, so a term can be toggled on and off. Count
+            // the NET state, not the number of lines: recompute from tags[] after
+            // the whole file is read rather than incrementing here.
+            r->tags[t] = (unsigned char)(v ? 1 : 0);
         }
     fclose(f);
+
+    // Now the net state is settled, count how many rolls actually carry each
+    // term. This is what earns a term its place on a number key alongside how
+    // often it gets written in descriptions.
+    for (int i = 0; i < g_count; i++)
+        for (int t = 0; t < g_vocabCount; t++)
+            if (g_rolls[i].tags[t]) g_vocab[t].tagUse++;
 }
 
 // Error flags (e): reversible, later-wins, same family as votes/tags. A line is
@@ -490,9 +794,10 @@ static void CastVote(LatentRoll* r, int vote)
 
 static void ToggleTag(LatentRoll* r, int t)
 {
+    if (t < 0 || t >= g_vocabCount) return;     // key bound to nothing yet
     r->tags[t] ^= 1;
     char line[96];
-    sprintf(line, "%S %s %d\r\n", r->id, TAG_NAMES[t], r->tags[t]);
+    sprintf(line, "%S %s %d\r\n", r->id, g_vocab[t].term, r->tags[t]);
     AppendLineA(L"latent_tags.txt", line);
 }
 
@@ -537,6 +842,12 @@ static void SaveNote(LatentRoll* r, const wchar_t* text)
     sprintf(line, "%S\t%s\r\n", r->id, utf8);
     AppendLineA(L"latent_notes.txt", line);
     r->hasNote = 1;
+
+    // The description IS the vocabulary source. Ingest, persist, rebind - so the
+    // number keys reflect the new counts on the very next roll, with no restart.
+    VocabIngestNote(text);
+    VocabSave();
+    VocabRebindKeys();
 }
 
 // ================================ the browser ================================
@@ -568,7 +879,9 @@ extern "C" void LatentBrowserOpen(void)
     ScanRolls();
     LoadVerdicts();
     LoadVotes();
+    VocabLoad();      // MUST precede LoadTags: tags resolve against the vocabulary
     LoadTags();
+    VocabRebindKeys();  // tag names met only in latent_tags.txt count too
     LoadErrors();
     LoadPromote();
     LoadNotes(NULL, NULL);
@@ -1271,7 +1584,10 @@ extern "C" int LatentBrowserHandleChar(int ch)
             if (g_count && RollVisible(g_sel)) LoadSelection();
             return 1;
         case '1': case '2': case '3': case '4': case '5': case '6':
-            ToggleTag(&g_rolls[g_sel], ch - '1');
+            // The key indexes the BINDING, not the vocabulary - which term sits
+            // on which key changes as the vocabulary grows, and the legend
+            // always shows the current words.
+            ToggleTag(&g_rolls[g_sel], g_keyTerm[ch - '1']);
             return 1;
         case 'e': case 'E':
             ToggleError(&g_rolls[g_sel]);
@@ -1507,25 +1823,30 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             if (g_rolls[i].promote) nProm++;
         }
 
-        // Tag-name legend, built from TAG_NAMES so it never drifts.
+        // Tag legend, built from the LIVE key bindings.
         // GARY 2026-07-28: "the 1-6 should be defined in the application. I
-        // shouldn't have to memorize them." The legend already existed but was
-        // abbreviated to the first 3 letters to keep the panel narrow -
-        // "1org 2geo 3gli 4wat 5spa 6???" is still a memory test, which is the
-        // whole complaint. FULL WORDS NOW, wrapped over two lines so the width
-        // cost is ~3 characters. The panel width is data-driven anyway, so
-        // legibility is the right side of this trade. Do not re-abbreviate.
-        // TAG_NAMES is compile-time constant, so build this once, not per frame.
+        // shouldn't have to memorize them." Full words, wrapped over two lines.
+        // Do not re-abbreviate - "1org 2geo 3gli" was the old version and it was
+        // still a memory test, which was the whole complaint.
+        // Rebuilt when the BINDINGS change (describing a roll can re-rank the
+        // vocabulary), not once - but keyed off a cheap signature so this is not
+        // doing string work every frame.
         static wchar_t tagLegend1[160] = { 0 };
         static wchar_t tagLegend2[160] = { 0 };
-        if (!tagLegend1[0])
+        static int     s_bindSig = -1;
+        int bindSig = 0;
+        for (int k = 0; k < LATENT_NKEYS; k++) bindSig = bindSig * 131 + (g_keyTerm[k] + 2);
+        if (bindSig != s_bindSig)
         {
+            s_bindSig = bindSig;
             int off = swprintf(tagLegend1, L"tag");
-            for (int t = 0; t < 3 && t < LATENT_NTAGS; t++)
-                off += swprintf(tagLegend1 + off, L"  %d %S", t + 1, TAG_NAMES[t]);
+            for (int k = 0; k < 3 && k < LATENT_NKEYS; k++)
+                off += swprintf(tagLegend1 + off, L"  %d %S", k + 1,
+                                g_keyTerm[k] >= 0 ? g_vocab[g_keyTerm[k]].term : "-");
             off = swprintf(tagLegend2, L"   ");
-            for (int t = 3; t < LATENT_NTAGS; t++)
-                off += swprintf(tagLegend2 + off, L"  %d %S", t + 1, TAG_NAMES[t]);
+            for (int k = 3; k < LATENT_NKEYS; k++)
+                off += swprintf(tagLegend2 + off, L"  %d %S", k + 1,
+                                g_keyTerm[k] >= 0 ? g_vocab[g_keyTerm[k]].term : "-");
         }
 
         // LX8 exposure readout for the SELECTED roll. The auto-exposure constant
@@ -1695,10 +2016,21 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                 if (r->vote == 1)      LatRect(dev, w, h, 4.0f, ry0, 8.0f, ry1, 0xFF30C060);
                 else if (r->vote == 0) LatRect(dev, w, h, 4.0f, ry0, 8.0f, ry1, 0xFF702020);
 
-                wchar_t tags[LATENT_NTAGS + 1];
-                int nt = 0;
-                for (int t = 0; t < LATENT_NTAGS; t++)
-                    if (r->tags[t]) tags[nt++] = (wchar_t)(L'1' + t);
+                // Key-bound terms show as their DIGIT; terms held by the roll but
+                // not currently on a key show as one '+' (the vocabulary can hold
+                // 64 terms and only 6 have keys, so without this the row would
+                // silently under-report what a roll is tagged with).
+                wchar_t tags[LATENT_NKEYS + 2];
+                int nt = 0, nExtra = 0;
+                for (int t = 0; t < g_vocabCount && t < LATENT_MAX_VOCAB; t++)
+                {
+                    if (!r->tags[t]) continue;
+                    int k = -1;
+                    for (int i = 0; i < LATENT_NKEYS; i++) if (g_keyTerm[i] == t) { k = i; break; }
+                    if (k >= 0 && nt < LATENT_NKEYS) tags[nt++] = (wchar_t)(L'1' + k);
+                    else nExtra++;
+                }
+                if (nExtra) tags[nt++] = L'+';
                 tags[nt] = 0;
 
                 wchar_t buf[96];
