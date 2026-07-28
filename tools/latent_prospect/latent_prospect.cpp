@@ -549,6 +549,15 @@ struct ScreenResult
     float score;        // ranking key: spatial richness x audio response
     float dance;        // mean |lens(f)| change on an audio transient
     unsigned int hash;  // FNV-1a over the quantized settled field (look-space)
+
+    // Behaviour characterization (docs\SWARM_DIVERSITY_DESIGN.md B1-B8). These
+    // are byproducts the screens ALREADY compute - hoisted out of their local
+    // scopes and reported, not newly calculated. Only gran (B2) is new work.
+    float flow;         // B1 mean curl-velocity magnitude
+    float gran;         // B2 neighbour difference / stddev = fine vs broad
+    float rowVar, colVar;// B3 anisotropy is derived from these
+    float gdance;       // B5 raw audio bend of the flow field
+    float mean, sd;     // B7 density, B8 contrast
 };
 
 // The curl-of-psi velocity at one point, exactly as the shader builds it
@@ -626,9 +635,9 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
     //    additively (psi = p.x - treb) cancels in the gradient. So measure the
     //    curl field numerically at two audio levels and require both motion and
     //    audio sensitivity.
+    float flow = 0.0f, gdance = 0.0f;
     {
         const int G = 8;
-        float flow = 0.0f, gdance = 0.0f;
         for (int gy = 0; gy < G; gy++)
         for (int gx = 0; gx < G; gx++)
         {
@@ -647,16 +656,17 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
     }
 
     // 3. Coarse look: 12x12, quick settle — kills flats/blacks/whites cheap.
+    float mean = 0.0f, sd = 0.0f;
     {
         float f[12 * 12];
         SettleField(t, lens, decay, 12, 1.0f, 0.5f, f);
-        float mean = 0.0f;
         for (int i = 0; i < 144; i++) mean += f[i];
         mean /= 144.0f;
         if (mean < 0.01f || mean > 0.95f) return 0;
         float var = 0.0f;
         for (int i = 0; i < 144; i++) var += (f[i] - mean) * (f[i] - mean);
-        if (sqrtf(var / 144.0f) < 0.02f) return 0;
+        sd = sqrtf(var / 144.0f);
+        if (sd < 0.02f) return 0;
     }
 
     // 4. Full grid at 32x32.
@@ -709,6 +719,31 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
 
     float spatial = 0.5f * (rowVar + colVar);
     res->score = spatial * (1.0f + 4.0f * (dance > 0.25f ? 0.25f : dance));
+
+    // B2 GRANULARITY - the only genuinely new descriptor. Mean absolute
+    // difference between 4-neighbours, normalised by the field's own contrast so
+    // it measures SCALE of structure rather than amount of it: a high value is
+    // fine filaments, a low value is broad soft shapes. Normalising is what
+    // stops it from simply re-reporting contrast (B8).
+    {
+        float nd = 0.0f; int nn = 0;
+        for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+        {
+            float c = f0[y * 32 + x];
+            if (x + 1 < 32) { nd += fabsf(f0[y * 32 + x + 1] - c); nn++; }
+            if (y + 1 < 32) { nd += fabsf(f0[(y + 1) * 32 + x] - c); nn++; }
+        }
+        nd = nn ? (nd / nn) : 0.0f;
+        float denom = 0.5f * (rowVar + colVar);
+        res->gran = (denom > 1e-6f) ? (nd / denom) : 0.0f;
+    }
+    res->flow   = flow;
+    res->gdance = gdance;
+    res->rowVar = rowVar;
+    res->colVar = colVar;
+    res->mean   = mean;
+    res->sd     = sd;
 
     // --seek threads (Gary, 2026-07-18: "a version that searches for long
     // threads" — fitting hunt for an app named after the loom thread).
@@ -1731,7 +1766,7 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
 int main(int argc, char** argv)
 {
     unsigned int start = 0, count = 0, single = 0;
-    int haveSingle = 0, haveDecode = 0, emitCap = LX_EMIT_CAP;
+    int haveSingle = 0, haveDecode = 0, haveBehave = 0, emitCap = LX_EMIT_CAP;
     int nThreads = 0;                  // 0 = auto (cores - 2, min 1)
     const char* outdir = NULL;
     const char* swarmDir = NULL;       // --swarm <Licium state dir> = LXS1 mode
@@ -1757,6 +1792,7 @@ int main(int argc, char** argv)
             }
         }
         else if (!strcmp(argv[i], "--decode") && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveDecode = 1; }
+        else if (!strcmp(argv[i], "--behave") && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveBehave = 1; }
         else if (!strcmp(argv[i], "--seed")   && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveSingle = 1; }
         else if (!strcmp(argv[i], "--start")  && i + 1 < argc) start  = (unsigned int)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--count")  && i + 1 < argc) count  = (unsigned int)strtoul(argv[++i], NULL, 0);
@@ -1776,6 +1812,28 @@ int main(int argc, char** argv)
         else { printf("unknown arg: %s\n", argv[i]); return 1; }
     }
 
+    // --behave: print one seed's behaviour characterization as CSV. Feeds the
+    // pre-registered perceptual test in docs\SWARM_DIVERSITY_DESIGN.md section 8
+    // BEFORE any archive or pheromone code is written - if these numbers do not
+    // track what Gary sees, nothing downstream is worth building.
+    if (haveBehave)
+    {
+        Tree t;
+        float decay = 0.0f;
+        if (!BuildFromSeed(single, &t, &decay)) { printf("%08X,GROWFAIL\n", single); return 1; }
+        Lens L = LensOfSeed(single);
+        ScreenResult r;
+        memset(&r, 0, sizeof(r));
+        if (!ScreenCandidate(&t, L, decay, &r)) { printf("%08X,SCREENFAIL\n", single); return 1; }
+        // seed,B1 flow,B2 gran,B3 aniso,B4 persist,B5 gbend,B6 dance,B7 dens,B8 contrast
+        float aniso = ((r.rowVar + r.colVar) > 1e-6f)
+                    ? fabsf(r.rowVar - r.colVar) / (r.rowVar + r.colVar) : 0.0f;
+        float gbend = (r.flow > 1e-6f) ? (r.gdance / r.flow) : 0.0f;
+        printf("%08X,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+               single, r.flow, r.gran, aniso, decay, gbend, r.dance, r.mean, r.sd);
+        return 0;
+    }
+
     if (promoteDir)
         return PromoteFromState(promoteDir) >= 0 ? 0 : 1;
 
@@ -1791,8 +1849,9 @@ int main(int argc, char** argv)
         float decay;
         if (!BuildFromSeed(single, &t, &decay)) { printf("grow failed (pool bound)\n"); return 1; }
         printf("LX%d-%08X\n", LX_GENVER, single);
-        printf("  decay = %.5f  lens = %d  palette = %d  nodes = %d (ink %d / psi %d)\n",
-               decay, LensOfSeed(single), PaletteOfSeed(single), t.count,
+        Lens dl = LensOfSeed(single);
+        printf("  decay = %.5f  lens = fold %.2f / inv %.2f  palette = %d  nodes = %d (ink %d / psi %d)\n",
+               decay, dl.fold, dl.inv, PaletteOfSeed(single), t.count,
                SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2));
         printf("  ink chain: ");
         PrintChain(&t, t.root);

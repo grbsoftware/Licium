@@ -251,6 +251,64 @@ per candidate and changes the economics completely) — *before* any scan is spe
 
 ---
 
+## 8b. RESULT OF THE §8 TEST — DESCRIPTORS B1-B8 ARE REJECTED (2026-07-28)
+
+**Ran it. It failed. Recording that here because a pre-registered test is
+worthless if only the passes get written down.**
+
+Setup: 48 LX7 rolls measured, 4 disjoint maximally-distant pairs and 4 disjoint
+maximally-close pairs (13x separation in normalised space), rendered, shuffled
+with a fixed seed, shown unlabelled.
+
+**Score: 4/8 — exactly chance.** Gary answered "different" to all eight.
+
+A single-label response set has no discriminative power, so on the numbers alone
+this was *inconclusive* rather than negative. **Gary's qualitative report
+resolved it and the verdict is negative:**
+
+> *"all the shaders you gave me — blown out to patterns, you gave me curved
+> stripes to straight, you gave me glitch complex to acute angular.. they are
+> very different"*
+
+The closest pair in the whole set (d=0.059, `0205E6E5` / `020D4C7B`) is soft
+curved organic lobes in purple/maroon versus hard rectilinear blocks in
+teal/plum. The descriptors call those near-twins. They are not.
+
+### Why B1-B8 failed — two nameable defects
+
+1. **Colour is absent entirely.** Palette is a side-hash independent of the
+   tree, so no descriptor sees it — but colour is the first thing a human judges
+   similarity by. Excluding it may be right for a *behaviour* metric, but then
+   the perceptual test must CONTROL for palette, and this one did not.
+   (`--palette-colors` already exists and can hold it constant.)
+2. **They measure AMOUNTS, not KINDS.** Motion, granularity, anisotropy,
+   density, contrast are all magnitudes. Gary's axes are categorical:
+   blown-out ↔ patterned, curved ↔ straight, glitch-complex ↔ acute-angular.
+   Two fields can match on every magnitude while one is smooth curves and the
+   other axis-aligned slabs.
+
+### The methodological lesson — the order was wrong
+
+The axes were guessed a priori and then tested against perception. That is
+backwards. **Gary's vocabulary is the ground truth; descriptors should be built
+to PREDICT his labels, not invented and validated afterward.**
+
+Consequence for sequencing: **the token vocabulary is now a PREREQUISITE for
+this design, not a parallel nice-to-have.** Collect his words for what he sees,
+then fit measurements that predict them. That turns descriptor choice from
+guesswork into a supervised problem with a real target.
+
+Also noted for the re-run: use **odd-one-out triads** (two near, one far, "which
+is the odd one out") rather than absolute alike/different. Chance is 1/3, no
+absolute calibration is required, and one label cannot cover every item — the
+failure mode that cost this run its power.
+
+**Sections 5 and 10.1 are superseded.** The mechanism (§6), the argument (§2),
+the method (§3) and the metric (§9) are untouched by this result — only the
+choice of descriptors is rejected.
+
+---
+
 ## 9. Success metric — NOT like-rate
 
 The three-haul experiment used like-rate, and that was right for a
@@ -269,13 +327,24 @@ Proposed, pre-committed:
 
 ---
 
-## 10. Open decisions for Gary
+## 10. Decisions — SETTLED by Gary, 2026-07-28
 
-1. **Map axes** — B1/B2/B3/B4 as proposed, or swap one for an audio axis
-   (B5/B6)? Audio reactivity is central to what this app *is*, but it cannot be
-   seen in a still frame, which makes it harder to validate in §8.
-2. **Grid resolution** — 6 bins/axis (1296 cells) as proposed?
-3. **Does the swarm emit the whole map, or the map's novel FRONTIER?** Emitting
-   every filled cell each run means re-seeing filled cells; emitting only newly
-   filled or newly improved cells is a smaller, fresher haul each time.
-4. **Run §8 first, or design further first?**
+1. **Map axes: B1 motion / B2 granularity / B3 anisotropy / B4 persistence.**
+   The four that can be judged in a still frame — which is the only reason the
+   §8 kill test is capable of validating them. Audio axes (B5/B6) stay in the
+   novelty distance but out of the grid, and get promoted to axes later only if
+   the method earns trust first.
+2. **Grid resolution: 6 bins per axis = 1296 cells.**
+3. **Emission: newly filled or newly improved cells only.** Each run is a fresh
+   haul of genuinely new behaviour; no re-seeing cells already judged. The full
+   map remains browsable in the archive on demand. This is the attention-wall
+   answer applied to the swarm's own output.
+4. **§8 kill test runs FIRST**, before any further design or code.
+
+### Consequence worth stating plainly
+
+Decisions 1 and 4 are load-bearing together: the grid deliberately contains only
+descriptors that a human can adjudicate by eye, *so that* the pre-registered
+perceptual test in §8 can actually falsify the design. Had an audio axis gone
+into the grid, one quarter of the map would have been unfalsifiable by the very
+test meant to validate it.
