@@ -64,7 +64,13 @@
 //     tree under LX8 - only the emitted exposure constant differs. That makes
 //     an LX7->LX8 rescue trivial if one is ever wanted (unlike LX4, which was
 //     stranded by an alphabet insertion).
-#define LX_GENVER      8
+//   * LX8 -> LX9 (2026-07-28, exposure floor): same auto-exposure, but the p90
+//     anchor gained a MEDIAN FLOOR - see ExposureOfTree. Gary's one quality
+//     complaint about LX8 was "unfortunately overfaint", and the measurement
+//     says he was right. Alphabet UNTOUCHED again; an LX8 seed grows the
+//     identical tree under LX9 and only the exposure constant differs, so this
+//     is the same trivial-rescue shape as LX7->LX8.
+#define LX_GENVER      9
 #define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
                                 // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
@@ -536,6 +542,8 @@ static float ApplyLens(const Lens& L, float f, float expo)
 //   * p90, NOT max. A DIV node with the 0.1 safe-div epsilon can spike enormous
 //     on a measure-zero set, and dividing by that would darken the whole roll to
 //     protect one pixel. Letting the top decile clip is where contrast lives.
+//   * ...but p90 alone describes only the TAIL, and LX9 adds a MEDIAN FLOOR so
+//     the BULK cannot be left in the dark. Both anchors, max of the two.
 //   * fb IS SWEPT OVER [0,1] because that is its range by construction (it is a
 //     luma of the previous frame). That is what makes this non-circular - the
 //     exposure does not need the settled field, which needs the lens, which
@@ -544,6 +552,7 @@ static float ApplyLens(const Lens& L, float f, float expo)
 //     so the CPU screens grade with the exact constant the shader will use.
 #define LX_EXPO_GRID  16
 #define LX_EXPO_NFB   4
+#define LX_EXPO_MEDIAN_TARGET 0.35f   // LX9: where the bulk must land, at worst
 
 static int LicCmpFloatAsc(const void* a, const void* b)
 {
@@ -551,10 +560,13 @@ static int LicCmpFloatAsc(const void* a, const void* b)
     return fa < fb ? -1 : (fa > fb ? 1 : 0);
 }
 
-static float ExposureOfTree(const Tree* t)
+#define LX_EXPO_NMAG (LX_EXPO_GRID * LX_EXPO_GRID * LX_EXPO_NFB)
+
+// The sampling half of the exposure, split out so the --expo diagnostic grades
+// the EXACT distribution ExposureOfTree decides on. Returns n, mag[] sorted asc.
+static int ExposureMags(const Tree* t, float* mag)
 {
     static const float FB[LX_EXPO_NFB] = { 0.0f, 0.333f, 0.667f, 1.0f };
-    float mag[LX_EXPO_GRID * LX_EXPO_GRID * LX_EXPO_NFB];
     int n = 0;
     for (int k = 0; k < LX_EXPO_NFB; k++)
     for (int y = 0; y < LX_EXPO_GRID; y++)
@@ -571,6 +583,13 @@ static float ExposureOfTree(const Tree* t)
         mag[n++] = fabsf(v);
     }
     qsort(mag, n, sizeof(float), LicCmpFloatAsc);
+    return n;
+}
+
+static float ExposureOfTree(const Tree* t)
+{
+    float mag[LX_EXPO_NMAG];
+    int n = ExposureMags(t, mag);
 
     float p90 = mag[(int)(0.90f * (n - 1))];
     // A near-zero field gets NO exposure rather than an enormous one. Such trees
@@ -579,6 +598,45 @@ static float ExposureOfTree(const Tree* t)
     if (!(p90 > 1e-4f)) return 1.0f;
 
     float e = 1.0f / p90;
+
+    // LX9 MEDIAN FLOOR. Anchoring on p90 alone pins the TAIL to the clamp
+    // ceiling, which says nothing about where the BULK lands. On a heavy-tailed
+    // field the two are far apart, and the bulk is what the eye reads as
+    // brightness. Gary, on an LX8 roll the p90 rule attenuated to 0.1499x:
+    // "unfortunately overfaint". Measured on that roll - p50 0.606, p90 6.67 -
+    // so the median landed at 0.091. Nine percent gray IS overfaint; the rule
+    // was working as designed and the design was wrong.
+    //
+    // Measured over all 67 LX8 rolls, p50*e under the shipped rule:
+    // p25 0.100, median 0.433, p75 1.000. Eighteen rolls land under 0.15.
+    //
+    // The fix is a FLOOR, not a swap. Swapping the anchor to the median was
+    // tried on paper first and is a clear regression: 23 of the 67 are binary
+    // LT/floor fields whose median already sits at the ceiling, and a
+    // median->k rule would DARKEN all 23 by k. Taking the max of the two
+    // anchors instead is monotone - measured over the same 67, zero rolls get
+    // darker at any k in [0.2, 0.5] - so this can only ever lift a field that
+    // the p90 rule left too dark, and never touches one it already suited.
+    //
+    // ATTENUATE-ONLY SURVIVES: the 1.0 cap below still applies to the result,
+    // so the LX8 A/B finding (amplification made both test rolls worse) is not
+    // being relitigated. The floor raises e toward 1.0, never past it.
+    //
+    // k = 0.35 from the sweep. Over the 67: k=0.2 lifts 7 rolls, 0.35 lifts 14,
+    // 0.5 lifts 24 - but 0.5 pushes 63 of 67 into clipping their top decile,
+    // which is the LX8 flats failure coming back the other way. At 0.35 the
+    // >=25%-clip count moves 36 -> 40. Gary's roll goes 0.1499 -> 0.5772.
+    //
+    // p50 <= 0 is SKIPPED, not floored: 14 of the 67 have an exactly-zero
+    // median (half the field is dead), where "put the median at 0.35" both
+    // divides by zero and means nothing. Those keep the p90 rule.
+    float p50 = mag[(int)(0.50f * (n - 1))];
+    if (p50 > 1e-4f)
+    {
+        float floorE = LX_EXPO_MEDIAN_TARGET / p50;
+        if (floorE > e) e = floorE;
+    }
+
     if (e < 1e-3f) e = 1e-3f;
     // ATTENUATE ONLY, NEVER AMPLIFY. Measured 2026-07-28 on four A/B pairs
     // (same seed, exposure on vs forced to 1.0, rendered in the real engine):
@@ -1869,7 +1927,7 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
 int main(int argc, char** argv)
 {
     unsigned int start = 0, count = 0, single = 0;
-    int haveSingle = 0, haveDecode = 0, haveBehave = 0, emitCap = LX_EMIT_CAP;
+    int haveSingle = 0, haveDecode = 0, haveBehave = 0, haveExpo = 0, emitCap = LX_EMIT_CAP;
     int nThreads = 0;                  // 0 = auto (cores - 2, min 1)
     const char* outdir = NULL;
     const char* swarmDir = NULL;       // --swarm <Licium state dir> = LXS1 mode
@@ -1896,6 +1954,7 @@ int main(int argc, char** argv)
         }
         else if (!strcmp(argv[i], "--decode") && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveDecode = 1; }
         else if (!strcmp(argv[i], "--behave") && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveBehave = 1; }
+        else if (!strcmp(argv[i], "--expo")   && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveExpo   = 1; }
         else if (!strcmp(argv[i], "--seed")   && i + 1 < argc) { single = (unsigned int)strtoul(argv[++i], NULL, 16); haveSingle = 1; }
         else if (!strcmp(argv[i], "--start")  && i + 1 < argc) start  = (unsigned int)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--count")  && i + 1 < argc) count  = (unsigned int)strtoul(argv[++i], NULL, 0);
@@ -1934,6 +1993,29 @@ int main(int argc, char** argv)
         float gbend = (r.flow > 1e-6f) ? (r.gdance / r.flow) : 0.0f;
         printf("%08X,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
                single, r.flow, r.gran, aniso, decay, gbend, r.dance, r.mean, r.sd);
+        return 0;
+    }
+
+    // --expo: print one seed's ink-magnitude distribution as CSV. Read-only
+    // diagnostic. Gary's one quality complaint about LX8 was "unfortunately
+    // overfaint" on a roll the p90 rule attenuated to 0.15x; p90 pins the TAIL
+    // to the clamp ceiling, so a heavy-tailed field leaves its BULK near zero.
+    // Whether the median is a better anchor - and at what target level - is a
+    // question about the shape of these distributions across real rolls, so
+    // measure them before changing the rule.
+    if (haveExpo)
+    {
+        Tree t;
+        float decay = 0.0f;
+        if (!BuildFromSeed(single, &t, &decay)) { printf("%08X,GROWFAIL\n", single); return 1; }
+        float mag[LX_EXPO_NMAG];
+        int n = ExposureMags(&t, mag);
+        // seed,n,p10,p25,p50,p75,p90,p99,max,e_shipped
+        printf("%08X,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", single, n,
+               mag[(int)(0.10f * (n - 1))], mag[(int)(0.25f * (n - 1))],
+               mag[(int)(0.50f * (n - 1))], mag[(int)(0.75f * (n - 1))],
+               mag[(int)(0.90f * (n - 1))], mag[(int)(0.99f * (n - 1))],
+               mag[n - 1], ExposureOfTree(&t));
         return 0;
     }
 
@@ -2008,6 +2090,7 @@ int main(int argc, char** argv)
         printf("              family exhaustively, screen, stratify-by-site emit as LXF%d- rolls\n", LX_GENVER);
         printf("  --seed HEX --outdir DIR   screen + force-emit one seed\n");
         printf("  --decode HEX              print chain + formula (cold lineages only)\n");
+        printf("  --expo HEX                CSV: ink-magnitude percentiles + shipped exposure\n");
         printf("  --selftest                byte-identical double-emission check\n");
         return 1;
     }
