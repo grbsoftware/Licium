@@ -57,7 +57,14 @@
 #include "../../vis_milk2/licium_palette_lib.h"
 #include "../../vis_milk2/licium_curves.h"   // shaping-curve family (shared w/ engine)
 
-#define LX_GENVER      7
+//   * LX7 -> LX8 (2026-07-28, auto-exposure): the ink tree's output is divided
+//     by a per-roll STATIC scale (ExposureOfTree) before the lens, so a
+//     fixed-range clamp stops mapping an arbitrary-magnitude field onto its
+//     ceiling. The alphabet is UNTOUCHED, so an LX7 seed grows the identical
+//     tree under LX8 - only the emitted exposure constant differs. That makes
+//     an LX7->LX8 rescue trivial if one is ever wanted (unlike LX4, which was
+//     stranded by an alphabet insertion).
+#define LX_GENVER      8
 #define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
                                 // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
@@ -397,10 +404,8 @@ static const char* LineageStr(void)
 //
 // So the flat is NOT caused by the shape of the clamp. It is caused by feeding
 // an arbitrary-scale signal into a fixed-range function. The fix is per-roll
-// AUTO-EXPOSURE: sample the tree over the grid during screening, take a high
-// percentile of |f| as that roll's scale, divide by it before clamping, and
-// emit the constant into the shader. Deterministic, so it stays reproducible.
-// That is a design step, not a constant tweak, and it has not been built.
+// AUTO-EXPOSURE, and as of LX8 it IS BUILT — see ExposureOfTree below. Do not
+// re-litigate the clamp's shape; measure the input's scale instead.
 //
 // What IS new here is Gary's call - the lens is CONTINUOUS. It used to be three
 // discrete modes; those are now the CORNERS of a two-axis space a roll can land
@@ -495,15 +500,100 @@ static float EvalNode(const Tree* tr, int i, const EvalCtx* c)
 
 static float Sat(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
 
-static float ApplyLens(const Lens& L, float f)
+static float ApplyLens(const Lens& L, float f, float expo)
 {
     // The LS2 lesson still holds - clipping negative structure hides real
     // behavior - so the fold axis keeps that recoverable. Must stay EXACTLY in
     // step with the HLSL emitted in EmitPreset, or the screens grade a
     // different medium than the shader draws.
+    f *= expo;                              // LX8 auto-exposure, see ExposureOfTree
     float a = f + (fabsf(f) - f) * L.fold;
     float b = a + ((1.0f - a) - a) * L.inv;
     return Sat(b);
+}
+
+// ---- LX8 AUTO-EXPOSURE ------------------------------------------------------
+// The flats' root cause, and Gary's own fix: "scale is dictated by the full
+// slope if possible so it will be drawn out until a full scale is reached, sort
+// of like an auto scale/zoom".
+//
+// The evolved tree's output has NO FIXED SCALE - typical |f| runs 5..50 and
+// differs per roll - so any fixed-range function maps the whole field onto its
+// ceiling. saturate clips, 1-exp races, f/(g+f) compresses: three routes, one
+// flat. Reshaping the clamp was tried twice and made it worse (see LensOfSeed).
+// Measure the input's scale instead.
+//
+// Design points, each of which is load-bearing:
+//   * STATIC per-roll, never runtime-adaptive. Settled by Gary. Every other
+//     contract here rests on a seed reproducing byte-for-byte; a scale that
+//     drifted with what is on screen would break reproducibility.
+//   * A PURE FUNCTION OF THE TREE, deliberately not carried in ScreenResult.
+//     The screens and EmitPreset both just call it, so they cannot disagree
+//     about what the exposure was - the same class of bug as the CPU lens
+//     drifting from the emitted HLSL.
+//   * MULTIPLY ONLY, NEVER OFFSET. The fold axis blends through abs(f); move
+//     the zero and abs() stops meaning abs.
+//   * p90, NOT max. A DIV node with the 0.1 safe-div epsilon can spike enormous
+//     on a measure-zero set, and dividing by that would darken the whole roll to
+//     protect one pixel. Letting the top decile clip is where contrast lives.
+//   * fb IS SWEPT OVER [0,1] because that is its range by construction (it is a
+//     luma of the previous frame). That is what makes this non-circular - the
+//     exposure does not need the settled field, which needs the lens, which
+//     needs the exposure.
+//   * The result is QUANTIZED TO 6 DECIMALS, the precision EmitPreset prints,
+//     so the CPU screens grade with the exact constant the shader will use.
+#define LX_EXPO_GRID  16
+#define LX_EXPO_NFB   4
+
+static int LicCmpFloatAsc(const void* a, const void* b)
+{
+    float fa = *(const float*)a, fb = *(const float*)b;
+    return fa < fb ? -1 : (fa > fb ? 1 : 0);
+}
+
+static float ExposureOfTree(const Tree* t)
+{
+    static const float FB[LX_EXPO_NFB] = { 0.0f, 0.333f, 0.667f, 1.0f };
+    float mag[LX_EXPO_GRID * LX_EXPO_GRID * LX_EXPO_NFB];
+    int n = 0;
+    for (int k = 0; k < LX_EXPO_NFB; k++)
+    for (int y = 0; y < LX_EXPO_GRID; y++)
+    for (int x = 0; x < LX_EXPO_GRID; x++)
+    {
+        EvalCtx c;
+        c.px = -1.0f + 2.0f * (x + 0.5f) / LX_EXPO_GRID;
+        c.py = -1.0f + 2.0f * (y + 0.5f) / LX_EXPO_GRID;
+        c.t  = 0.5f;                        // the reference time the screens settle at
+        c.bass = c.mid = c.treb = 1.0f;     // silence pins these to 1.0 in-engine
+        c.fb = FB[k];
+        float v = EvalNode(t, t->root, &c);
+        if (v != v) v = 0.0f;               // NaN: ignore rather than poison the sort
+        mag[n++] = fabsf(v);
+    }
+    qsort(mag, n, sizeof(float), LicCmpFloatAsc);
+
+    float p90 = mag[(int)(0.90f * (n - 1))];
+    // A near-zero field gets NO exposure rather than an enormous one. Such trees
+    // are flats on their own merits and the variance screens will say so; a huge
+    // multiplier would launder one into a passer.
+    if (!(p90 > 1e-4f)) return 1.0f;
+
+    float e = 1.0f / p90;
+    if (e < 1e-3f) e = 1e-3f;
+    // ATTENUATE ONLY, NEVER AMPLIFY. Measured 2026-07-28 on four A/B pairs
+    // (same seed, exposure on vs forced to 1.0, rendered in the real engine):
+    // both attenuating rolls were clear wins - 0.058x turned a near-black roll
+    // into structure and colour, 0.084x opened a razor-thin thread into a broad
+    // gradient. Both amplifying rolls got WORSE - 2.86x turned faint structure
+    // into one uniform pink, and 8.25x sent everything but a glitch corner to
+    // the ceiling. The mechanism outranks the sample size: the diagnosed cause
+    // of the flats is a field whose magnitude OVERRUNS the clamp, so scaling a
+    // field UP can only push it further into the clamp. There is no route by
+    // which amplification reduces flatness.
+    if (e > 1.0f)  e = 1.0f;
+    // Round in double: e can reach 1e3, and 1e3*1e6 exceeds float's exact-integer
+    // range, so a float round here would not land on the printed value.
+    return (float)(floor((double)e * 1e6 + 0.5) / 1e6);
 }
 
 static int TreeUses(const Tree* t, int kindLo, int kindHi)
@@ -581,8 +671,8 @@ static void PsiVel(const Tree* t, float px, float py, float tt, float aud,
 }
 
 // Settle the field at audio level 'aud'; write lens values into out[cells].
-static void SettleField(const Tree* t, const Lens& lens, float decay, int grid,
-                        float aud, float tt, float* out)
+static void SettleField(const Tree* t, const Lens& lens, float expo, float decay,
+                        int grid, float aud, float tt, float* out)
 {
     const float inj = 1.0f - decay;            // injK = 1 -> equilibrium at ~lens max
     for (int y = 0; y < grid; y++)
@@ -598,7 +688,7 @@ static void SettleField(const Tree* t, const Lens& lens, float decay, int grid,
         for (int k = 0; k < 40; k++)
         {
             c.fb = fb;
-            lf = ApplyLens(lens, EvalNode(t, t->root, &c));
+            lf = ApplyLens(lens, EvalNode(t, t->root, &c), expo);
             fb = fb * decay + inj * lf;
         }
         out[y * grid + x] = lf;
@@ -655,11 +745,18 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
         if (gdance < 0.03f) return 0;    // audio doesn't bend the flow
     }
 
+    // LX8: this roll's own scale. Computed HERE — after the free structural
+    // screens and the flow screen, before anything settles the field — because
+    // every screen below grades the EXPOSED field, which is the field the shader
+    // will actually draw. Cost is 1024 evals, well under the coarse settle's
+    // 12*12*40, and only candidates that already survived the cheap rejects pay it.
+    const float expo = ExposureOfTree(t);
+
     // 3. Coarse look: 12x12, quick settle — kills flats/blacks/whites cheap.
     float mean = 0.0f, sd = 0.0f;
     {
         float f[12 * 12];
-        SettleField(t, lens, decay, 12, 1.0f, 0.5f, f);
+        SettleField(t, lens, expo, decay, 12, 1.0f, 0.5f, f);
         for (int i = 0; i < 144; i++) mean += f[i];
         mean /= 144.0f;
         if (mean < 0.01f || mean > 0.95f) return 0;
@@ -671,7 +768,7 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
 
     // 4. Full grid at 32x32.
     float f0[32 * 32], f1[32 * 32];   // per-call: ScreenCandidate runs on worker threads
-    SettleField(t, lens, decay, 32, 1.0f, 0.5f, f0);
+    SettleField(t, lens, expo, decay, 32, 1.0f, 0.5f, f0);
 
     // 2D-axis variance: variation along BOTH axes (kills stripes: a field
     // that only varies in x is a barcode, however lively).
@@ -702,7 +799,7 @@ static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenR
     // field, so this no longer gates — it only rewards an ink field that also
     // happens to respond. The must-dance guarantee moved to the psi-uses-audio
     // structural screen above.
-    SettleField(t, lens, decay, 32, 1.35f, 0.5f, f1);
+    SettleField(t, lens, expo, decay, 32, 1.35f, 0.5f, f1);
     float dance = 0.0f;
     for (int i = 0; i < 32 * 32; i++) dance += fabsf(f1[i] - f0[i]);
     dance /= 32.0f * 32.0f;
@@ -1004,6 +1101,12 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         // the roll that ships.
         {
             char lb[256];
+            // LX8 auto-exposure. Divide-only (the printed constant is already
+            // 1/p90), so zero stays zero and the fold's abs() keeps its meaning.
+            // %.6f matches the quantization ExposureOfTree applies, so the field
+            // the screens graded is the field this shader draws.
+            _snprintf(lb, sizeof(lb) - 1, "f *= %.6f;\n", ExposureOfTree(t));
+            lb[sizeof(lb) - 1] = 0; body.Raw(lb);
             _snprintf(lb, sizeof(lb) - 1, "float lg = lerp(f, abs(f), %.4f);\n", lens.fold);
             lb[sizeof(lb) - 1] = 0; body.Raw(lb);
             _snprintf(lb, sizeof(lb) - 1, "f = saturate(lerp(lg, 1.0 - lg, %.4f));\n", lens.inv);
