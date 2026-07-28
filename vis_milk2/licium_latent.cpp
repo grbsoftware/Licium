@@ -1397,6 +1397,26 @@ static int LatTextW(const wchar_t* s)
     return g_plugin.HostMeasureTextW(s, SIMPLE_FONT);
 }
 
+// LX8 auto-exposure readback. The constant is emitted inline in the buf0 shader
+// body as "f *= C;" and deliberately has NO .milk key (it needs no engine
+// support), so the browser reads it back out of the file. Returns -1 when the
+// marker is absent, which is how every pre-LX8 roll reads.
+// Caller must rate-limit: this opens a file, so it is for the selected roll
+// only, never for the whole list.
+static float LatReadExpo(const wchar_t* file)
+{
+    if (!file || !file[0]) return -1.0f;
+    FILE* f = _wfopen(file, L"rb");
+    if (!f) return -1.0f;
+    static char buf[131072];              // render thread only; rolls are ~20KB
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char* p = strstr(buf, "f *= ");
+    if (!p) return -1.0f;
+    return (float)atof(p + 5);
+}
+
 // The window is the porthole canvas (a fixed square, often 512px) — every
 // line here must fit ~60 chars at SIMPLE_FONT size or it clips at the edge
 // (DT_WORD_ELLIPSIS doesn't truncate through m_text). Plain '-' only: this
@@ -1467,7 +1487,7 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
         int line    = h / 30;
         if (line < fh + fh / 4) line = fh + fh / 4;
         if (line < 15) line = 15;
-        int headerH = line * 7 + line / 2;
+        int headerH = line * 9 + line / 2;   // 9 lines: +1 tag-legend wrap, +1 expo
         int rowH    = line + 2;
         const int x0 = 10;
 
@@ -1483,17 +1503,44 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             if (g_rolls[i].promote) nProm++;
         }
 
-        // Tag-name legend line, built from TAG_NAMES so it never drifts (Gary
-        // "still has no idea what 1-6 are"). Abbreviated to first 3 letters to
-        // keep the panel narrow: "tags 1org 2geo 3gli 4wat 5spa 6???".
+        // Tag-name legend, built from TAG_NAMES so it never drifts.
+        // GARY 2026-07-28: "the 1-6 should be defined in the application. I
+        // shouldn't have to memorize them." The legend already existed but was
+        // abbreviated to the first 3 letters to keep the panel narrow -
+        // "1org 2geo 3gli 4wat 5spa 6???" is still a memory test, which is the
+        // whole complaint. FULL WORDS NOW, wrapped over two lines so the width
+        // cost is ~3 characters. The panel width is data-driven anyway, so
+        // legibility is the right side of this trade. Do not re-abbreviate.
         // TAG_NAMES is compile-time constant, so build this once, not per frame.
-        static wchar_t tagLegend[160] = { 0 };
-        if (!tagLegend[0])
+        static wchar_t tagLegend1[160] = { 0 };
+        static wchar_t tagLegend2[160] = { 0 };
+        if (!tagLegend1[0])
         {
-            int off = swprintf(tagLegend, L"tags");
-            for (int t = 0; t < LATENT_NTAGS; t++)
-                off += swprintf(tagLegend + off, L" %d%.3S", t + 1, TAG_NAMES[t]);
+            int off = swprintf(tagLegend1, L"tag");
+            for (int t = 0; t < 3 && t < LATENT_NTAGS; t++)
+                off += swprintf(tagLegend1 + off, L"  %d %S", t + 1, TAG_NAMES[t]);
+            off = swprintf(tagLegend2, L"   ");
+            for (int t = 3; t < LATENT_NTAGS; t++)
+                off += swprintf(tagLegend2 + off, L"  %d %S", t + 1, TAG_NAMES[t]);
         }
+
+        // LX8 exposure readout for the SELECTED roll. The auto-exposure constant
+        // is emitted inline in the shader body ("f *= C;") and has no .milk key,
+        // so it has to be read back out of the file - and lazily, for the
+        // selection only: the browser holds ~1400 rolls and a read per roll would
+        // land a full directory of file opens in the browser's open path.
+        static int   s_expoSel = -2;
+        static float s_expoVal = -1.0f;
+        if (g_sel != s_expoSel)
+        {
+            s_expoSel = g_sel;
+            s_expoVal = (g_sel >= 0 && g_sel < g_count) ? LatReadExpo(g_rolls[g_sel].file)
+                                                        : -1.0f;
+        }
+        wchar_t expoLine[64];
+        if (s_expoVal < 0.0f)             swprintf(expoLine, L"expo  n/a (pre-LX8)");
+        else if (s_expoVal >= 0.9999f)    swprintf(expoLine, L"expo  1.000  no-op");
+        else                              swprintf(expoLine, L"expo  %.3f  ATTENUATED", s_expoVal);
 
         // e = flag broken (copied to latent_errors\), f = queue for family
         // promotion (--promote reads latent_promote.txt). Counts ride this line.
@@ -1517,7 +1564,12 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
             if ((t = LatTextW(L"Y like  N pass  U clr  / find")) > m) m = t;
             if ((t = LatTextW(annLine))                        > m) m = t;
             if ((t = LatTextW(L"1-6 tag  D descr  c color"))    > m) m = t;
-            if ((t = LatTextW(tagLegend))                      > m) m = t;
+            if ((t = LatTextW(tagLegend1))                     > m) m = t;
+            if ((t = LatTextW(tagLegend2))                     > m) m = t;
+            // Measure a WORST-CASE exposure line, not the live one: the live
+            // string changes on every selection move and would bust the width
+            // cache (and its GDI round trips) on every arrow key.
+            if ((t = LatTextW(L"expo  0.000  ATTENUATED"))      > m) m = t;
             if ((t = LatTextW(L"p pal  h hide voted  X close")) > m) m = t;
             if ((t = LatTextW(L"LATENT   \x00b7 000 to vote   pal 00/00")) > m) m = t;
             s_w = m;
@@ -1564,11 +1616,18 @@ extern "C" void LatentBrowserRender(IDirect3DDevice9* dev, int w, int h)
                     (nErr || nProm) ? 0xFFCC8877 : 0xFF9999AA);
             LatText(L"1-6 tag  D descr  c color",
                     x0, line / 2 + line * 4, x1, line / 2 + line * 5, 0xFF9999AA);
-            LatText(tagLegend,
+            LatText(tagLegend1,
                     x0, line / 2 + line * 5, x1, line / 2 + line * 6, 0xFF9999AA);
+            LatText(tagLegend2,
+                    x0, line / 2 + line * 6, x1, line / 2 + line * 7, 0xFF9999AA);
+            // Attenuated rolls are the ones LX8 actually changed - highlight so
+            // the roll under test is obvious without leaving the browser.
+            LatText(expoLine,
+                    x0, line / 2 + line * 7, x1, line / 2 + line * 8,
+                    (s_expoVal >= 0.0f && s_expoVal < 0.9999f) ? 0xFF70C0FF : 0xFF9999AA);
             LatText(g_hideVoted ? L"p pal  h show all  X close"
                                 : L"p pal  h hide voted  X close",
-                    x0, line / 2 + line * 6, x1, line / 2 + line * 7, 0xFF9999AA);
+                    x0, line / 2 + line * 8, x1, line / 2 + line * 9, 0xFF9999AA);
         }
 
         if (g_count == 0)
