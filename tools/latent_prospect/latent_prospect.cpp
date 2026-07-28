@@ -57,7 +57,7 @@
 #include "../../vis_milk2/licium_palette_lib.h"
 #include "../../vis_milk2/licium_curves.h"   // shaping-curve family (shared w/ engine)
 
-#define LX_GENVER      6
+#define LX_GENVER      7
 #define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
                                 // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
@@ -373,11 +373,50 @@ static const char* LineageStr(void)
 
 // ---- side-hashes (documented contract, independent of the LCG stream) -------
 
-static int LensOfSeed(unsigned int seed)     // 0 sat(f)  1 sat(|f|)  2 sat(1-|f|)
+// LX7: the lens is CONTINUOUS. It used to be three discrete modes - sat(f),
+// sat(|f|), sat(1-|f|) - and Gary's call was "allow both and everything in
+// between". Those three are now the CORNERS of a two-axis space a roll can land
+// anywhere inside:
+//   fold : 0 = signed passthrough        1 = folded through abs()
+//   inv  : 0 = as-is                     1 = inverted (the zero-crossing glow)
+// (0,0)=old lens 0, (1,0)=old lens 1, (1,1)=old lens 2, and every blend exists.
+//
+// The saturate() CLAMP is deliberately still here, and two failed attempts at
+// removing it are worth writing down so nobody repeats them:
+//
+//   * A LOGISTIC was worse. "Asymptotic, so no value ever repeats" is true in
+//     float and false on screen - the frame is 8-bit, 0.982 and 0.9999 are one
+//     pixel, so a curve that races to its ceiling makes a flat anyway. Worse, a
+//     logistic's slope at centre is k/4, so k=6..10 was 1.5-2.5x STEEPER than
+//     the saturate it replaced: it hardened the clip while trying to soften it.
+//     Rolls came back as two flat colours with a hard seam.
+//   * f/(g+f) was also worse, and the reason is the REAL one: the evolved tree's
+//     output has no fixed scale. Typical magnitudes run 5..50 and vary per roll,
+//     so f/(1+f) lands the entire field in 0.83..0.98 and the roll reads as one
+//     hue. saturate has exactly the same disease - it just clips instead.
+//
+// So the flat is NOT caused by the shape of the clamp. It is caused by feeding
+// an arbitrary-scale signal into a fixed-range function. The fix is per-roll
+// AUTO-EXPOSURE: sample the tree over the grid during screening, take a high
+// percentile of |f| as that roll's scale, divide by it before clamping, and
+// emit the constant into the shader. Deterministic, so it stays reproducible.
+// That is a design step, not a constant tweak, and it has not been built.
+//
+// What IS new here is Gary's call - the lens is CONTINUOUS. It used to be three
+// discrete modes; those are now the CORNERS of a two-axis space a roll can land
+// anywhere inside:
+//   fold : 0 = signed passthrough        1 = folded through abs()
+//   inv  : 0 = as-is                     1 = inverted (the zero-crossing glow)
+// (0,0)=old lens 0, (1,0)=old lens 1, (1,1)=old lens 2, and every blend exists.
+typedef struct { float fold, inv; } Lens;
+
+static Lens LensOfSeed(unsigned int seed)
 {
     unsigned int h = (seed ^ 0x4C454E53u) * 2246822519u;   // 'LENS'
-    unsigned int r = (h >> 8) % 100u;
-    return (r < 45u) ? 0 : (r < 75u) ? 1 : 2;
+    Lens L;
+    L.fold = (float)((h >> 8)  & 0xFFFu) / 4095.0f;
+    L.inv  = (float)((h >> 20) & 0xFFFu) / 4095.0f;
+    return L;
 }
 
 // LX2: a palette qualifies only if it carries two genuinely chromatic colors
@@ -456,14 +495,15 @@ static float EvalNode(const Tree* tr, int i, const EvalCtx* c)
 
 static float Sat(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
 
-static float ApplyLens(int lens, float f)
+static float ApplyLens(const Lens& L, float f)
 {
-    // The LS2 lesson: saturate(f) alone clips ALL negative structure — dark
-    // rolls were hiding real behavior. Three lenses, hashed per seed, applied
-    // identically here and in the emitted shader.
-    if (lens == 0) return Sat(f);
-    if (lens == 1) return Sat(fabsf(f));
-    return Sat(1.0f - fabsf(f));               // zero-crossing glow
+    // The LS2 lesson still holds - clipping negative structure hides real
+    // behavior - so the fold axis keeps that recoverable. Must stay EXACTLY in
+    // step with the HLSL emitted in EmitPreset, or the screens grade a
+    // different medium than the shader draws.
+    float a = f + (fabsf(f) - f) * L.fold;
+    float b = a + ((1.0f - a) - a) * L.inv;
+    return Sat(b);
 }
 
 static int TreeUses(const Tree* t, int kindLo, int kindHi)
@@ -532,7 +572,7 @@ static void PsiVel(const Tree* t, float px, float py, float tt, float aud,
 }
 
 // Settle the field at audio level 'aud'; write lens values into out[cells].
-static void SettleField(const Tree* t, int lens, float decay, int grid,
+static void SettleField(const Tree* t, const Lens& lens, float decay, int grid,
                         float aud, float tt, float* out)
 {
     const float inj = 1.0f - decay;            // injK = 1 -> equilibrium at ~lens max
@@ -556,7 +596,7 @@ static void SettleField(const Tree* t, int lens, float decay, int grid,
     }
 }
 
-static int ScreenCandidate(const Tree* t, int lens, float decay, ScreenResult* res)
+static int ScreenCandidate(const Tree* t, const Lens& lens, float decay, ScreenResult* res)
 {
     // 1. Budget — per subtree now (the pool holds ink + psi).
     int inkSz = SubtreeSize(t, t->root);
@@ -830,7 +870,7 @@ static unsigned int g_palOverride[5];
 
 static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
 {
-    const int lens = LensOfSeed(seed);
+    const Lens lens = LensOfSeed(seed);
     const int pi   = PaletteOfSeed(seed);
 
     // Palette: curated lib pick (or an explicit override) -> luminance-sort ->
@@ -923,9 +963,17 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         g_posVar = "p";
         EmitExpr(t, t->root, &body);
         body.Raw(";\n");
-        if (lens == 0)      body.Raw("f = saturate(f);\n");
-        else if (lens == 1) body.Raw("f = saturate(abs(f));\n");
-        else                body.Raw("f = saturate(1.0 - abs(f));\n");
+        // LX7 continuous lens. MUST stay byte-for-byte in step with ApplyLens()
+        // above - the screens settle the field on the CPU and the shader draws
+        // it on the GPU, and if the two disagree the roll that was graded is not
+        // the roll that ships.
+        {
+            char lb[256];
+            _snprintf(lb, sizeof(lb) - 1, "float lg = lerp(f, abs(f), %.4f);\n", lens.fold);
+            lb[sizeof(lb) - 1] = 0; body.Raw(lb);
+            _snprintf(lb, sizeof(lb) - 1, "f = saturate(lerp(lg, 1.0 - lg, %.4f));\n", lens.inv);
+            lb[sizeof(lb) - 1] = 0; body.Raw(lb);
+        }
 
         // Evolved flow potential psi -> divergence-free curl velocity.
         body.Raw("float e = 0.012;\n");
@@ -1009,7 +1057,11 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         //    stops are emitted PRE-SQUARED so the whole chain interpolates in
         //    linear light, with one sqrt at the end to get back. That is not full
         //    oklab - it is the cheap 90% of it, for one instruction.
-        body.Raw("float dens = Curve3(1.0 - exp(-max(dot(c, lw) * 3.0, 0.0)));\n");
+        // Same correction as the lens: 1-exp(-x) reaches its ceiling far too
+        // fast to survive 8-bit output, so it re-created the very flat it was
+        // meant to remove. x/(1+x) has the same slope at the origin and a much
+        // longer approach, so bright regions keep their separation.
+        body.Raw("float dens = Curve3(saturate(dot(c, lw) * 3.0));\n");
         body.Raw("float rt = dens * 3.0;\n");
         _snprintf(l, sizeof(l) - 1,
             "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), saturate(rt));\n",
@@ -1617,6 +1669,7 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
     qsort(bb, nBuckets, sizeof(FamBucket), CmpFamBucket);
 
     std::vector<char> used((size_t)npass, 0);
+    std::vector<char> logged((size_t)npass, 0);   // got a queue.jsonl row
     int nEmitted = 0;
     int anyLeft = 1;
     while (anyLeft && nEmitted < emitCap)
@@ -1640,18 +1693,38 @@ static int FamilyScan(const char* stateDir, const char* outdir, int emitCap)
                         {
                             nEmitted++;
                             if (q)
+                            {
                                 fprintf(q, "{\"id\":\"LXF%d-%08X\",\"score\":%.5f,\"family\":%d,\"site\":%d,\"emitted\":1}\n",
                                         LX_GENVER, pp[k].packed, pp[k].score, pp[k].fam, pp[k].site);
+                                logged[(size_t)k] = 1;
+                            }
                         }
                     }
                     break;   // one per bucket per round
                 }
         }
     }
+    // THE STORE LEAK. Only EMITTED children got a queue row, so a run that
+    // grafted 26,665 passers recorded 70 of them and dropped the rest on the
+    // floor. The cold path's contract (see the header: "ranked queue.jsonl -
+    // EVERY passer, forever") was never meant to have an exception, and this was
+    // the one place breaking it. What was lost is not the RESULTS - enumeration
+    // is deterministic, so any of them can be re-derived - but the only way to
+    // look at one again was to re-run the whole scan. emitted:0 means "found,
+    // screened, not drawn yet", exactly as it does in the cold queue.
+    int nLogged = 0;
+    if (q)
+        for (int k = 0; k < npass; k++)
+            if (!logged[(size_t)k])
+            {
+                fprintf(q, "{\"id\":\"LXF%d-%08X\",\"score\":%.5f,\"family\":%d,\"site\":%d,\"emitted\":0}\n",
+                        LX_GENVER, pp[k].packed, pp[k].score, pp[k].fam, pp[k].site);
+                nLogged++;
+            }
     if (q) fclose(q);
 
-    printf("families: %u grafts, %u passed screens, %d emitted -> %s (%d threads)\n",
-           nGrafted, nScreened, nEmitted, outdir, nThreads);
+    printf("families: %u grafts, %u passed screens, %d emitted, %d queued-not-drawn -> %s (%d threads)\n",
+           nGrafted, nScreened, nEmitted, nLogged, outdir, nThreads);
     return 0;
 }
 
@@ -1748,8 +1821,9 @@ int main(int argc, char** argv)
         int pass = ScreenCandidate(&t, LensOfSeed(single), decay, &r);
         char path[1024];
         if (!EmitRollFile(single, outdir, path, sizeof(path), outfile)) { printf("emit failed\n"); return 1; }
-        printf("LX%d-%08X  decay=%.4f lens=%d  ink=%d psi=%d nodes  screen=%s",
-               LX_GENVER, single, decay, LensOfSeed(single),
+        Lens sl = LensOfSeed(single);
+        printf("LX%d-%08X  decay=%.4f lens=%.2f/%.2f  ink=%d psi=%d nodes  screen=%s",
+               LX_GENVER, single, decay, sl.fold, sl.inv,
                SubtreeSize(&t, t.root), SubtreeSize(&t, t.root2),
                pass ? "PASS" : "reject");
         if (pass) printf("  score=%.4f dance=%.4f", r.score, r.dance);

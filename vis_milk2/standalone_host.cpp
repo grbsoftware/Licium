@@ -232,6 +232,13 @@ static int     g_splashW         = 0;
 static int     g_splashH         = 0;
 static DWORD   g_splashDismissAt = 0;   // nonzero = fading out since this tick
 
+// Auto-dismiss (Gary, 2026-07-28: "splash auto close should be like 20 sec
+// max"). Every launch otherwise costs a click, and a launch happens on every
+// rebuild. Only the STARTUP splash expires - Help > About is something you
+// opened on purpose and it waits for you.
+#define SPLASH_AUTO_MS 20000
+static DWORD   g_splashAutoAt    = 0;   // tick to self-dismiss at; 0 = never
+
 static void HostSplashBeginDismiss(void)
 {
     if (g_splashWnd && !g_splashDismissAt)
@@ -394,6 +401,7 @@ static void HostSplashDestroy(void)
     if (g_splashWnd) { DestroyWindow(g_splashWnd); g_splashWnd = 0; }
     if (g_splashBmp) { DeleteObject(g_splashBmp);  g_splashBmp = 0; }
     g_splashDismissAt = 0;
+    g_splashAutoAt    = 0;
 }
 
 // Show the splash/About panel. activate=0 at startup (the engine window keeps
@@ -401,6 +409,9 @@ static void HostSplashDestroy(void)
 // can dismiss it). Re-callable: a second call while visible just re-fronts it.
 static void HostSplashShow(HINSTANCE hInstance, int activate)
 {
+    // startup splash expires on its own; About does not
+    g_splashAutoAt = activate ? 0 : (GetTickCount() + SPLASH_AUTO_MS);
+
     if (g_splashWnd)
     {
         g_splashDismissAt = 0;   // was mid-fade? restore it
@@ -441,7 +452,16 @@ static void HostSplashShow(HINSTANCE hInstance, int activate)
 // dismiss begins, fade out and tear down.
 static void HostSplashTick(void)
 {
-    if (!g_splashWnd || !g_splashDismissAt) return;
+    if (!g_splashWnd) return;
+
+    if (!g_splashDismissAt)
+    {
+        // signed compare so the 49-day GetTickCount wrap can't strand it visible
+        if (!g_splashAutoAt || (int)(GetTickCount() - g_splashAutoAt) < 0)
+            return;
+        HostSplashBeginDismiss();
+    }
+
     DWORD t = GetTickCount() - g_splashDismissAt;
     if (t < SPLASH_FADE_MS)
         SetLayeredWindowAttributes(g_splashWnd, 0,
