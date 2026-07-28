@@ -5111,8 +5111,20 @@ void CPlugin::MyRenderUI(
                 // display on one line
                 RECT box = rect;
                 box.bottom = 4096;
+#ifdef MILKDROP_STANDALONE
+                // LICIUM: WRAP LONG WAITSTRINGS. DrawTextW does not wrap without
+                // DT_WORDBREAK, so the Latent browser's "describe this roll" text
+                // ran straight off the right edge and Gary could not see what he
+                // was typing. The measure pass and the draw MUST carry the same
+                // flag or the dark box is sized for one line and the text spills
+                // out of it. Short waitstrings (save-as filenames, menu strings)
+                // never reach the margin, so this is inert for them.
+                const DWORD lic_wrap = DT_WORDBREAK;
+#else
+                const DWORD lic_wrap = 0;
+#endif
 				swprintf(buf2, L"    %sX", buf);  // put a final 'X' instead of ' ' b/c CALCRECT returns w==0 if string is entirely whitespace!
-				m_text.DrawTextW(GetFont(SIMPLE_FONT), buf2, -1, &box, DT_CALCRECT, MENU_COLOR, false );
+				m_text.DrawTextW(GetFont(SIMPLE_FONT), buf2, -1, &box, DT_CALCRECT | lic_wrap, MENU_COLOR, false );
 
                 // use r2 to draw a dark box:
                 box.top -= PLAYLIST_INNER_MARGIN;
@@ -5122,8 +5134,8 @@ void CPlugin::MyRenderUI(
                 DrawDarkTranslucentBox(&box);
                 *upper_left_corner_y += box.bottom - box.top + PLAYLIST_INNER_MARGIN*3;
 
-				swprintf(buf2, L"    %s ", buf);  
-                m_text.DrawTextW(GetFont(SIMPLE_FONT), buf2, -1, &rect, 0, MENU_COLOR, false );
+				swprintf(buf2, L"    %s ", buf);
+                m_text.DrawTextW(GetFont(SIMPLE_FONT), buf2, -1, &rect, lic_wrap, MENU_COLOR, false );
 			}
 		}
 		else if (m_UI_mode == UI_MENU)

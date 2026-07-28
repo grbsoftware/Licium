@@ -86,7 +86,11 @@ static const wchar_t* VerdictShort(int v)
 
 #define LATENT_ID_LEN   20    // "LX1-XXXXXXXX" + headroom for later genvers
 #define LATENT_NTAGS    6
-#define LATENT_NOTE_LEN 256
+// 512 -> nMaxLen 511, which is the engine's documented waitstring ceiling
+// ("can't be more than 511", plugin.h td_waitstr). Was 256, and Gary's very
+// first real description ran ~180 chars, so the old cap was about two sentences
+// from cutting him off mid-thought. Every buffer below is sized off this define.
+#define LATENT_NOTE_LEN 512
 
 static const char* TAG_NAMES[LATENT_NTAGS] =
     { "organic", "geometric", "glitchy", "watery", "sparkly", "???" };
