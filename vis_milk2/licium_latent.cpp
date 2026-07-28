@@ -2139,11 +2139,10 @@ extern "C" void LatentSearchOverlayRender(IDirect3DDevice9* dev, int w, int h)
 // The docked strip (licium_cockpit.cpp) is chrome and owns no state; the tools
 // run here, where the roll selection and the tune overlay already live.
 //
-// Several tools are roll-scoped — they act on the SELECTED roll, which only
-// exists while the browser is open. Rather than half-open the browser behind
-// the user's back, those say so in the dock's status line. The unbuilt slices
-// say that plainly too: a slot that lies about being wired is worse than an
-// empty one.
+// The dock only draws while the browser is open, so a selection normally
+// exists by construction; the guard below is for the empty-list case (a fresh
+// install, or every roll hidden behind a filter). The unbuilt slices say so
+// plainly: a slot that lies about being wired is worse than an empty one.
 
 extern "C" void LiciumCockpitInvoke(int tool)
 {
@@ -2154,7 +2153,7 @@ extern "C" void LiciumCockpitInvoke(int tool)
     case LCT_COLOR:
         if (!haveRoll)
         {
-            LiciumCockpitSetStatus(L"Color: open the browser (x) and select a roll first");
+            LiciumCockpitSetStatus(L"Color: no roll selected");
             return;
         }
         LiciumTuneColorOpen(HostGetMainWnd());
@@ -2173,7 +2172,7 @@ extern "C" void LiciumCockpitInvoke(int tool)
         // keyboard route that already works is more use than a dead button.
         LiciumCockpitSetStatus(haveRoll
             ? L"not built yet - keyboard for now: p palette, Y/N grade, f family"
-            : L"open the browser (x) and select a roll first");
+            : L"no roll selected");
         return;
 
     default:

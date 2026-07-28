@@ -1,9 +1,12 @@
 // licium_cockpit.h — the Tune cockpit's docked tool strip.
 //
-// A PERMANENT column of tool buttons welded to the right edge of the canvas
-// (Gary 2026-07-26: "like adobe but not floating or dismissible"). There is no
-// toggle and no close: it is chrome, not a panel, and it is drawn on every
-// frame the engine draws.
+// A column of tool buttons welded to the right edge of the canvas. Within the
+// X browser it is PERMANENT (Gary 2026-07-26: "like adobe but not floating or
+// dismissible") - no toggle, no close, it is chrome rather than a panel. It is
+// drawn ONLY while the browser is open, though (Gary 2026-07-27: "that tools
+// should only show up in X"), which follows from what the tools are: every one
+// acts on the SELECTED ROLL, and outside the browser there is no selection, so
+// a dock out there would be ten buttons that could only say "open the browser".
 //
 // It OVERLAYS the canvas rather than shrinking it. Making it steal width would
 // mean renegotiating the render target and the porthole's square crop on every

@@ -20,6 +20,7 @@
 
 #include "api.h"
 #include "licium_cockpit.h"
+#include "licium_latent.h"   // LatentBrowserIsOpen - the dock rides the browser
 #include "plugin.h"
 
 #include <stdio.h>
@@ -32,24 +33,41 @@ extern CPlugin g_plugin;
 // its background is that panel's 0xD8000000 and its inner edge that panel's
 // 0xFF303030. Changing these is changing the browser's too — keep them in step.
 
-#define LC_BG          0xD8000000   // dock background (85% black over canvas)
-#define LC_EDGE        0xFF303030   // 2px rule down the inner side
-#define LC_FACE        0xFF1A1A20   // square at rest
-#define LC_FACE_HOVER  0xFF24242C   // under the cursor
-#define LC_FACE_DOWN   0xFF141418   // held
-#define LC_FACE_OFF    0xFF15151A   // unavailable right now
-#define LC_EMB_LIGHT   0x18FFFFFF   // 9% white  - the "nearly invisible" part
-#define LC_EMB_DARK    0x30000000   // 19% black
-#define LC_LABEL       0xFF9A9AA6
-#define LC_LABEL_HOVER 0xFFE6E6F0
-#define LC_LABEL_OFF   0xFF4A4A52
-#define LC_ACCENT      0xFF6E6EA0   // active tool's inner tick
-#define LC_STATUS      0xFF8A8A96
+// Translucent, not opaque (Gary 2026-07-27: "the right side is a harsh contrast
+// to light colored shaders"). At 85% black the dock was a slab dropped on top of
+// a cream roll. Smoked glass instead: the panel and the squares both let the
+// image through, so the dock sits ON the composition rather than punching a hole
+// in it, and it stops fighting light and dark rolls differently. Legibility is
+// carried by the labels' own black shadow, not by the panel being dark.
+// One translucent panel, and NO fill on the squares at rest (Gary 2026-07-27:
+// "what if they are just translucent? like the left side using alpha? That gray
+// feels out of place"). Filling each square painted a grey slab over whatever
+// was behind it, which on a cream roll was the most obtrusive thing on screen.
+// A button at rest is now just its emboss and its label; only hover and press
+// put any ink down. Labels are near-white because they have to survive both a
+// black roll and a cream one - the panel is no longer dark enough to carry them.
+#define LC_BG          0xD8000000   // EXACTLY the browser panel's alpha
+#define LC_EDGE        0xFF303030   // EXACTLY the browser panel's rule
+#define LC_FACE        0x00000000   // square at rest: nothing at all
+#define LC_FACE_HOVER  0x6632323E   // under the cursor
+#define LC_FACE_DOWN   0x7A0E0E12   // held
+#define LC_FACE_OFF    0x00000000   // unavailable: also nothing, the label says it
+#define LC_EMB_LIGHT   0x22FFFFFF   // 13% white - the "nearly invisible" part
+#define LC_EMB_DARK    0x38000000   // 22% black
+#define LC_LABEL       0xFFF0F0F6
+#define LC_LABEL_HOVER 0xFFFFFFFF
+#define LC_LABEL_OFF   0xFF8C8C96
+#define LC_ACCENT      0xFF9A9AD8   // active tool's inner tick
+#define LC_STATUS      0xFFE0E0EA
 
 // ================================ the tools ==================================
-// Two to four characters, because the square is sized off the font and a longer
-// label would either shrink the type or burst the square. The full name goes in
-// the status line on hover, which is where discovery actually happens.
+// WHOLE WORDS, not abbreviations. The squares are five text lines wide, which
+// fits every one of these, and "Rct" / "Crv" / "Grd" bought nothing but a thing
+// to decode (Gary asked whether symbols would read better - the answer is that
+// half these tools have no natural glyph, and Zoom and Search would fight over
+// the only obvious one). Symbols get revisited at the pixel-art pass, where a
+// hand-drawn tile set can be designed as one family. The sentence-long name
+// still goes to the status line on hover.
 
 struct LcTool
 {
@@ -60,16 +78,16 @@ struct LcTool
 
 static const LcTool g_tools[LCT_COUNT] =
 {
-    { L"Col",  L"Color - hue, saturation, light, contrast, cycle", 1 },
-    { L"Mot",  L"Motion - smear, gain, smooth, band tilt",         0 },
-    { L"Rct",  L"React - source to target links, response curves", 0 },
-    { L"Zm",   L"Zoom - pull back past the frame",                 0 },
-    { L"Rot",  L"Rotate - turn the view",                          0 },
-    { L"Crv",  L"Curves - the shaping curves, per slot",           0 },
-    { L"Pal",  L"Palette - cycle this roll's palette",             0 },
-    { L"Grd",  L"Grade - like, pass, tags, error flag",            0 },
-    { L"Fam",  L"Family - promote this roll and scan its grafts",  0 },
-    { L"Sch",  L"Search - run a latent search",                    1 },
+    { L"Color",   L"Color - hue, saturation, light, contrast, cycle", 1 },
+    { L"Motion",  L"Motion - smear, gain, smooth, band tilt",         0 },
+    { L"React",   L"React - source to target links, response curves", 0 },
+    { L"Zoom",    L"Zoom - pull back past the frame",                 0 },
+    { L"Rotate",  L"Rotate - turn the view",                          0 },
+    { L"Curves",  L"Curves - the shaping curves, per slot",           0 },
+    { L"Palette", L"Palette - cycle this roll's palette",             0 },
+    { L"Grade",   L"Grade - like, pass, tags, error flag",            0 },
+    { L"Family",  L"Family - promote this roll and scan its grafts",  0 },
+    { L"Search",  L"Search - run a latent search",                    1 },
 };
 
 // ================================ state ======================================
@@ -78,6 +96,17 @@ static int     g_hover  = -1;
 static int     g_down   = -1;   // button currently held (armed for a click)
 static int     g_active = -1;   // tool whose dialog is up, for the accent tick
 static wchar_t g_status[160] = L"";
+
+// The dock lives INSIDE the X browser (Gary 2026-07-27: "that tools should only
+// show up in X"). Permanent within the browser - no toggle, no close - but the
+// idle visualization stays clean. It follows from what the tools are: every one
+// of them acts on the SELECTED ROLL, and outside the browser there is no
+// selection for them to act on, so a dock out there would be ten buttons that
+// could only tell you to open the browser.
+static int LcVisible(void)
+{
+    return LatentBrowserIsOpen() ? 1 : 0;
+}
 
 // Layout, recomputed per frame from the canvas size. Cheap (no GDI: the metrics
 // come from the font height, not from measuring strings — the per-frame
@@ -206,7 +235,8 @@ static void LcDrawButton(IDirect3DDevice9* dev, int w, int h, const LcLayout* L,
     if      (state == 1) face = LC_FACE_HOVER;
     else if (state == 2) face = LC_FACE_DOWN;
     else if (state == 3) face = LC_FACE_OFF;
-    LcRect(dev, w, h, x0, y0, x1, y1, face);
+    if (face >> 24)   // fully transparent at rest: skip the quad entirely
+        LcRect(dev, w, h, x0, y0, x1, y1, face);
 
     // The emboss. Held flips which pair of edges catches the light, which is
     // what makes the square read as pushed in rather than merely darker.
@@ -238,8 +268,13 @@ static void LcDrawButton(IDirect3DDevice9* dev, int w, int h, const LcLayout* L,
 
 extern "C" void LiciumCockpitRender(IDirect3DDevice9* dev, int w, int h)
 {
-    if (!dev || w <= 0 || h <= 0)
+    if (!LcVisible() || !dev || w <= 0 || h <= 0)
+    {
+        // Leaving the browser drops any hover/press so the dock does not come
+        // back lit from a cursor position that no longer means anything.
+        g_hover = g_down = -1;
         return;
+    }
     if (!g_plugin.GetFont(SIMPLE_FONT))
         return;
 
@@ -263,6 +298,13 @@ extern "C" void LiciumCockpitRender(IDirect3DDevice9* dev, int w, int h)
     LcComputeLayout(w, h, &L);
 
     LcRect(dev, w, h, L.x0, 0.0f, L.x1, (float)h, LC_BG);
+
+    // A hard 2px rule, matching the browser panel's. The feathered fade tried
+    // earlier was the wrong read of "harsh": the problem was never the edge, it
+    // was that a half-alpha panel greys out over a light roll while the
+    // browser's 85% stays dark and legible. Same alpha, same rule, same
+    // behaviour on both sides (Gary: "I just want to match how the left side
+    // behaves"). A difference-blend edge is the parked idea for later.
     LcRect(dev, w, h, L.x0, 0.0f, L.x0 + 2.0f, (float)h, LC_EDGE);
 
     // Header. A hairline under it does the work a box would, without adding a
@@ -313,6 +355,7 @@ extern "C" void LiciumCockpitRender(IDirect3DDevice9* dev, int w, int h)
 
 extern "C" int LiciumCockpitMouseMove(int x, int y, int w, int h)
 {
+    if (!LcVisible()) { g_hover = -1; return 0; }
     int hit = LcHit(x, y, w, h);
     g_hover = hit;
     LcLayout L;
@@ -322,6 +365,7 @@ extern "C" int LiciumCockpitMouseMove(int x, int y, int w, int h)
 
 extern "C" int LiciumCockpitMouseDown(int x, int y, int w, int h)
 {
+    if (!LcVisible()) return 0;   // no dock, no claim on the click
     int hit = LcHit(x, y, w, h);
     LcLayout L;
     LcComputeLayout(w, h, &L);
@@ -336,6 +380,7 @@ extern "C" int LiciumCockpitMouseDown(int x, int y, int w, int h)
 
 extern "C" int LiciumCockpitMouseUp(int x, int y, int w, int h)
 {
+    if (!LcVisible()) { g_down = -1; return 0; }
     int armed = g_down;
     g_down = -1;
     if (armed < 0)
@@ -353,6 +398,7 @@ extern "C" int LiciumCockpitMouseUp(int x, int y, int w, int h)
 
 extern "C" int LiciumCockpitWidth(int w, int h)
 {
+    if (!LcVisible()) return 0;   // nothing is being covered while it is hidden
     LcLayout L;
     LcComputeLayout(w, h, &L);
     return (int)(L.x1 - L.x0);
