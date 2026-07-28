@@ -298,7 +298,12 @@ static void VocabSave(void)
 // Tokenise one description into the vocabulary. Free text in, terms out - the
 // input is never constrained, because constraining it is what would put my
 // guesses back in place of Gary's words.
-static void VocabIngestNote(const wchar_t* note)
+//
+// delta is +1 to ingest and -1 to UN-ingest. Re-describing a roll must replace
+// its contribution, not add to it: latent_notes.txt is an append-log where the
+// last line for an id wins, so without the -1 pass the superseded words keep
+// their votes forever and a roll described twice counts double.
+static void VocabApplyNote(const wchar_t* note, int delta)
 {
     char w[LATENT_TERM_LEN];
     int n = 0;
@@ -320,8 +325,20 @@ static void VocabIngestNote(const wchar_t* note)
                     VocabCanon(w);
                     if (!VocabIsStop(w))
                     {
-                        int i = VocabFindOrAdd(w);
-                        if (i >= 0) g_vocab[i].count++;
+                        if (delta > 0)
+                        {
+                            int i = VocabFindOrAdd(w);
+                            if (i >= 0) g_vocab[i].count++;
+                        }
+                        else
+                        {
+                            // Never ADD a term on the way down, and floor at 0:
+                            // a hand-edited latent_vocab.txt can legitimately
+                            // disagree with the notes, and that must not
+                            // underflow into a huge unsigned-looking rank.
+                            int i = VocabFind(w);
+                            if (i >= 0 && g_vocab[i].count > 0) g_vocab[i].count--;
+                        }
                     }
                 }
             }
@@ -331,14 +348,50 @@ static void VocabIngestNote(const wchar_t* note)
     }
 }
 
+static void VocabIngestNote(const wchar_t* note) { VocabApplyNote(note, +1); }
+
+// One-time mining of the whole note history. Must honour the same later-wins
+// rule as LoadNotes, so a re-described roll contributes its CURRENT words once
+// and its earlier drafts not at all. Two passes: record the last offset per id,
+// then ingest only those lines.
+#define LATENT_MAX_NOTED 2048
+
 static void VocabIngestAllNotes(void)
 {
     wchar_t path[MAX_PATH]; VocabPath(path, L"latent_notes.txt");
     FILE* f = _wfopen(path, L"rb");
     if (!f) return;
+
+    static char ids[LATENT_MAX_NOTED][LATENT_ID_LEN];
+    static long off[LATENT_MAX_NOTED];
+    int nIds = 0;
+
     char line[LATENT_NOTE_LEN * 3 + 64];
+    long pos = ftell(f);
     while (fgets(line, sizeof(line), f))
     {
+        long next = ftell(f);
+        char* tab = strchr(line, '\t');
+        if (tab)
+        {
+            *tab = 0;
+            int k = -1;
+            for (int i = 0; i < nIds; i++) if (!strcmp(ids[i], line)) { k = i; break; }
+            if (k < 0 && nIds < LATENT_MAX_NOTED)
+            {
+                k = nIds++;
+                strncpy(ids[k], line, LATENT_ID_LEN - 1);
+                ids[k][LATENT_ID_LEN - 1] = 0;
+            }
+            if (k >= 0) off[k] = pos;      // later lines win
+        }
+        pos = next;
+    }
+
+    for (int i = 0; i < nIds; i++)
+    {
+        if (fseek(f, off[i], SEEK_SET) != 0) continue;
+        if (!fgets(line, sizeof(line), f)) continue;
         char* tab = strchr(line, '\t');
         if (!tab) continue;
         wchar_t wide[LATENT_NOTE_LEN * 2];
@@ -836,6 +889,13 @@ static void TogglePromote(LatentRoll* r)
 static void SaveNote(LatentRoll* r, const wchar_t* text)
 {
     if (!text[0]) return;               // empty accept = no line (cancel-like)
+
+    // Re-describing REPLACES: pull the words this roll currently contributes and
+    // subtract them before the new line is appended. Read it first - once the
+    // append lands, "the last note for this id" is the new one.
+    wchar_t prev[LATENT_NOTE_LEN];
+    LoadNotes(r->id, prev);
+
     char utf8[LATENT_NOTE_LEN * 3];
     WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, sizeof(utf8), NULL, NULL);
     char line[LATENT_NOTE_LEN * 3 + 32];
@@ -845,6 +905,7 @@ static void SaveNote(LatentRoll* r, const wchar_t* text)
 
     // The description IS the vocabulary source. Ingest, persist, rebind - so the
     // number keys reflect the new counts on the very next roll, with no restart.
+    if (prev[0]) VocabApplyNote(prev, -1);
     VocabIngestNote(text);
     VocabSave();
     VocabRebindKeys();
@@ -1761,8 +1822,21 @@ static void RenderLanding(IDirect3DDevice9* dev, int w, int h)
 
     LatText(L"Up/Down browse (loads live)   PgUp/PgDn jump",        x0, y, x1, y + line, 0xFFAACCEE); y += line;
     LatText(L"Y / Space like   N pass   U clear vote",              x0, y, x1, y + line, 0xFFAACCEE); y += line;
-    LatText(L"1-6 tags: organic geometric glitchy",                 x0, y, x1, y + line, 0xFFAACCEE); y += line;
-    LatText(L"          watery sparkly ???",                        x0, y, x1, y + line, 0xFFAACCEE); y += line;
+    // The landing page is the FIRST thing the browser shows, so it must name the
+    // same terms the HUD legend does. Hardcoding the old six here would reinstate
+    // the memory test the live vocabulary exists to remove - and would advertise
+    // "watery"/"sparkly", the two nobody has ever used.
+    wchar_t keys1[160], keys2[160];
+    int off = swprintf(keys1, L"1-6 tags:");
+    for (int k = 0; k < 3 && k < LATENT_NKEYS; k++)
+        off += swprintf(keys1 + off, L" %S",
+                        g_keyTerm[k] >= 0 ? g_vocab[g_keyTerm[k]].term : "-");
+    off = swprintf(keys2, L"         ");
+    for (int k = 3; k < LATENT_NKEYS; k++)
+        off += swprintf(keys2 + off, L" %S",
+                        g_keyTerm[k] >= 0 ? g_vocab[g_keyTerm[k]].term : "-");
+    LatText(keys1,                                                  x0, y, x1, y + line, 0xFFAACCEE); y += line;
+    LatText(keys2,                                                  x0, y, x1, y + line, 0xFFAACCEE); y += line;
     LatText(L"D / Enter describe   X / Esc close",                  x0, y, x1, y + line, 0xFFAACCEE); y += line;
     LatText(L"p recolor (liked palettes)   h hide voted rolls",     x0, y, x1, y + line, 0xFFAACCEE); y += line * 2;
 
