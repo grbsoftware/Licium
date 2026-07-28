@@ -230,6 +230,7 @@ CState::CState()
     }
     for (int c=0; c<LICIUM_NUM_CURVES; c++)
         m_nCurveSeed[c] = 0;
+    m_nCurveFamily = LICIUM_CURVE_FAMILY_V1;
 
 	// this is the list of variables that can be used for a PER-FRAME calculation;
 	// it is a SUBSET of the per-vertex calculation variable list.
@@ -716,6 +717,7 @@ void CState::Default(DWORD ApplyFlags)
         // ...and so do the curve seeds the shaders sample
         for (int c=0; c<LICIUM_NUM_CURVES; c++)
             m_nCurveSeed[c] = 0;
+        m_nCurveFamily = LICIUM_CURVE_FAMILY_V1;
     }
 
     RandomizePresetVars();
@@ -1019,6 +1021,13 @@ bool CState::Export(const wchar_t *szIniFile)
     for (int c=0; c<LICIUM_NUM_CURVES; c++)
         if (m_nCurveSeed[c])
             fprintf(fOut, "curve%d_seed=%u\n", c, m_nCurveSeed[c]);
+
+    // Which curve FAMILY those seeds are to be read under. Only written when it
+    // is not V1, so every .milk ever emitted before families existed still
+    // round-trips byte-identical - and an absent key parses back as V1, which
+    // is what those files have always meant.
+    if (m_nCurveFamily != LICIUM_CURVE_FAMILY_V1)
+        fprintf(fOut, "curve_family=%d\n", m_nCurveFamily);
 
 	fclose(fOut);
 
@@ -1504,6 +1513,12 @@ bool CState::Import(const wchar_t *szIniFile, float fTime, CState* pOldState, DW
             sprintf(curveprefix, "curve%d_seed", c);
             m_nCurveSeed[c] = (unsigned int)GetFastInt(curveprefix, 0, f);
         }
+
+        // Default V1 on purpose: every roll emitted before the family key
+        // existed was drawn with the v1 shape, so an absent key has to keep
+        // meaning v1 or the whole graded library changes look underneath Gary.
+        m_nCurveFamily = GetFastInt("curve_family", LICIUM_CURVE_FAMILY_V1, f);
+        if (m_nCurveFamily < LICIUM_CURVE_FAMILY_V1) m_nCurveFamily = LICIUM_CURVE_FAMILY_V1;
     }
 
     m_nMaxPSVersion = max(m_nWarpPSVersion, m_nCompPSVersion);

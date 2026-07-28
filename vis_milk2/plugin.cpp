@@ -1107,6 +1107,7 @@ void CPlugin::MyPreInitialize()
     {
         m_lpCurveLut[i]     = NULL;
         m_nCurveLutSeed[i]  = 0;
+        m_nCurveLutFamily[i]= LICIUM_CURVE_FAMILY_V1;
     }
     m_lpDDSTitle			= NULL;
     m_nTitleTexSizeX        = 0;
@@ -3728,6 +3729,7 @@ void CPlugin::CurveLuts_Ensure()
         }
 
         m_nCurveLutSeed[n] = 0;     // nothing baked yet
+        m_nCurveLutFamily[n] = LICIUM_CURVE_FAMILY_V1;
 
         // Register under "curveN" so that (a) cleanup releases it with the rest,
         // and (b) sampler_curveN + texsize_curveN resolve through the pristine
@@ -3762,13 +3764,17 @@ void CPlugin::CurveLuts_Update(CState* pState)
         // preset changes leave most slots alone, and a re-bake is ~256 tanh
         // evaluations, so this is cheap either way - it just keeps the common
         // case at zero cost.
-        if (!m_lpCurveLut[n] || seed == m_nCurveLutSeed[n])
+        // The family is part of the cache key, not just the seed: two presets
+        // can carry the SAME curve seed and read it under different families,
+        // and a seed-only key would serve the previous preset's table.
+        if (!m_lpCurveLut[n] || (seed == m_nCurveLutSeed[n] &&
+                                 pState->m_nCurveFamily == m_nCurveLutFamily[n]))
             continue;
 
         float table[LICIUM_CURVE_LUT_W];
         if (seed)
         {
-            LiciumCurveBakeSeed(seed, table);
+            LiciumCurveBakeSeedFamily(seed, pState->m_nCurveFamily, table);
         }
         else
         {
@@ -3815,6 +3821,7 @@ void CPlugin::CurveLuts_Update(CState* pState)
 
         m_lpCurveLut[n]->UnlockRect(0);
         m_nCurveLutSeed[n] = seed;
+        m_nCurveLutFamily[n] = pState->m_nCurveFamily;
     }
 }
 
@@ -3826,6 +3833,7 @@ void CPlugin::CurveLuts_Release()
     {
         m_lpCurveLut[n]  = NULL;
         m_nCurveLutSeed[n] = 0;
+        m_nCurveLutFamily[n] = LICIUM_CURVE_FAMILY_V1;
     }
 }
 

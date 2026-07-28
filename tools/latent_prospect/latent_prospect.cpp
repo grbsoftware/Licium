@@ -57,7 +57,7 @@
 #include "../../vis_milk2/licium_palette_lib.h"
 #include "../../vis_milk2/licium_curves.h"   // shaping-curve family (shared w/ engine)
 
-#define LX_GENVER      5
+#define LX_GENVER      6
 #define LX_HARD_QUOTA  1        // LX5 floor policy: hard steps (floor/frac) allowed
                                 // per BUILD before excess draws remap to soft curves
 #define LX_EMIT_CAP    200      // emit cap != discard: every passer stays in queue.jsonl
@@ -241,7 +241,7 @@ static int BuildFromSeed(unsigned int seed, Tree* t, float* decay)
     // can read them in the screens, and EmitPreset writes the same seeds). Slots
     // 0..2 are tree-drawable; slot 3 is the comp color ramp.
     for (int c = 0; c < LICIUM_NUM_CURVES; c++)
-        t->curve[c] = LiciumCurveFromSeed(CurveSeedOfSlot(seed, c));
+        t->curve[c] = LiciumCurveFromSeedFamily(CurveSeedOfSlot(seed, c), LICIUM_CURVE_FAMILY_CUR);
     t->root  = GrowNode(&rng, t, 0, SWARM_ROOT, 0);
     if (t->root < 0) return 0;
     t->root2 = GrowNode(&rng, t, 0, SWARM_ROOT, 0);   // psi flow potential
@@ -442,7 +442,7 @@ static float EvalNode(const Tree* tr, int i, const EvalCtx* c)
     case NK_FRAC: { float a = EvalNode(tr, n->l, c); return a - floorf(a); }
     case NK_FLOOR:return floorf(EvalNode(tr, n->l, c));
     case NK_NEG:  return -EvalNode(tr, n->l, c);
-    case NK_CURVE:return LiciumCurveEval(tr->curve[n->slot], EvalNode(tr, n->l, c));
+    case NK_CURVE:return LiciumCurveEvalFamily(tr->curve[n->slot], EvalNode(tr, n->l, c));
     case NK_PX:   return c->px;
     case NK_PY:   return c->py;
     case NK_TIME: return c->t;
@@ -897,6 +897,11 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         out->Add("curve%d_seed=%u", cs, cseed);
     }
 
+    // LX6: declare which curve FAMILY those seeds are to be read under. Without
+    // this key the engine defaults to V1 - which is exactly right for every roll
+    // emitted before now, and exactly wrong for this one.
+    out->Add("curve_family=%d", LICIUM_CURVE_FAMILY_CUR);
+
     // --- buf0: EVOLVED medium, evolved ink (LX4 rung 2) ----------------------
     // The template is the guardrail (decay, injection, clamp, velocity cap) but
     // the MOTION is no longer a fixed swirl: velocity = curl of an evolved flow
@@ -979,23 +984,47 @@ static void EmitPreset(unsigned int seed, const Tree* t, float decay, Str* out)
         body.Raw("float3 nrm = normalize(float3(-lx*3.5, -ly*3.5, 1.0));\n");
         body.Raw("float3 lgt = normalize(float3(cos(time*0.23), sin(time*0.19), 0.55 + 0.45*mid_att));\n");
         body.Raw("float sheen = pow(saturate(dot(nrm, lgt)), 2.5);\n");
-        // LX5: the density response is shaped by the rolled comp-ramp curve (slot
-        // 3) instead of a fixed saturate(), and the three stop weights are
-        // smoothstep (C1) instead of saturate() (the old hard-clamp cliffs). With
-        // curve3_seed==identity this reduces to a softened version of the old ramp.
-        body.Raw("float dens = Curve3(saturate(dot(c, lw) * 3.0));\n");
+        // LX6: three separate causes of visible colour BANDING are fixed here.
+        // Gary's report was "the flats are still there ... some of them lost the
+        // flats and were replaced with thin lines for the colors", after the
+        // fp16 LUT had already removed the 8-bit quantization plateaus. So the
+        // remaining bands were being produced by this block, not by the table.
+        //
+        // 1. saturate() on the density input CLIPPED. Every pixel past the knee
+        //    pinned to exactly 1.0 and shaded to pure accent - a genuine flat
+        //    region, and the brighter the roll the larger it got. Replaced with
+        //    1-exp(-x), which is monotone, smooth, and approaches 1 asymptotically
+        //    without ever arriving: no value is ever repeated, so no plateau.
+        //
+        // 2. smoothstep has ZERO DERIVATIVE AT BOTH ENDPOINTS. Weighting the
+        //    stops with smoothstep(0,0.34) / (0.33,0.67) / (0.66,1) meant the
+        //    colour stopped changing at each stop boundary and at both extremes -
+        //    a stall reads as a band exactly like a plateau does. The stops are
+        //    now walked with a single parameter at CONSTANT slope, so the colour
+        //    is always moving. A slope corner at a stop is far weaker than a
+        //    stall, and interpolating in linear light (below) softens it further.
+        //
+        // 3. The lerp ran on gamma-encoded literals, which sags through a dark
+        //    muddy middle between two stops and spaces the fade unevenly. The
+        //    stops are emitted PRE-SQUARED so the whole chain interpolates in
+        //    linear light, with one sqrt at the end to get back. That is not full
+        //    oklab - it is the cheap 90% of it, for one instruction.
+        body.Raw("float dens = Curve3(1.0 - exp(-max(dot(c, lw) * 3.0, 0.0)));\n");
+        body.Raw("float rt = dens * 3.0;\n");
         _snprintf(l, sizeof(l) - 1,
-            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), smoothstep(0.0, 0.34, dens));\n",
-            deep[0], deep[1], deep[2], s1[0], s1[1], s1[2]);
+            "float3 ramp = lerp(float3(%.4f,%.4f,%.4f), float3(%.4f,%.4f,%.4f), saturate(rt));\n",
+            deep[0]*deep[0], deep[1]*deep[1], deep[2]*deep[2],
+            s1[0]*s1[0],     s1[1]*s1[1],     s1[2]*s1[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
-            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), smoothstep(0.33, 0.67, dens));\n",
-            s2[0], s2[1], s2[2]);
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(rt - 1.0));\n",
+            s2[0]*s2[0], s2[1]*s2[1], s2[2]*s2[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
         _snprintf(l, sizeof(l) - 1,
-            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), smoothstep(0.66, 1.0, dens));\n",
-            accent[0], accent[1], accent[2]);
+            "ramp = lerp(ramp, float3(%.4f,%.4f,%.4f), saturate(rt - 2.0));\n",
+            accent[0]*accent[0], accent[1]*accent[1], accent[2]*accent[2]);
         l[sizeof(l) - 1] = 0; body.Raw(l);
+        body.Raw("ramp = sqrt(max(ramp, 0.0));\n");
         _snprintf(l, sizeof(l) - 1,
             "ret = ramp + float3(%.4f,%.4f,%.4f) * sheen * dens * 0.5;\n",
             accent[0], accent[1], accent[2]);
@@ -1227,7 +1256,7 @@ static int    g_nFam = 0;
 static void FamilyBakeCurves(Family* fm)
 {
     for (int c = 0; c < LICIUM_NUM_CURVES; c++)
-        fm->tree.curve[c] = LiciumCurveFromSeed(CurveSeedOfSlot(fm->seed, c));
+        fm->tree.curve[c] = LiciumCurveFromSeedFamily(CurveSeedOfSlot(fm->seed, c), LICIUM_CURVE_FAMILY_CUR);
 }
 
 static int LoadFamilies(const char* stateDir)

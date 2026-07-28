@@ -391,6 +391,7 @@ public:
     // a curve is fully determined by its seed (licium_curves.h), so the file
     // stays small and the engine bakes on load. 0 = slot unused.
     unsigned int    m_nCurveSeed[LICIUM_NUM_CURVES];
+    int             m_nCurveFamily;   // which shaping-curve family the seeds mean; absent in a .milk = V1
 	void			FreeVarsAndCode(bool bFree = true);
 	void			RegisterBuiltInVariables(int flags);
 	void			StripLinefeedCharsAndComments(char *src, char *dest);
