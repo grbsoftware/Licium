@@ -30,11 +30,11 @@ No modal dialog (`host_dialogs.log` empty) and NDEBUG is set (asserts compiled o
 so it is NOT an assert/error-box path — it is corrupt generated code.
 
 ## Facts / environment
-- Repo: `C:\Users\grben\MilkdropProject\MD2-port` (NOT under Claude Sessions cwd).
+- Repo: `<repo>` (kept outside any synced-folder working directory).
 - Build: MSBuild v143 override (asserts off via NDEBUG). Command that works:
   ```
   & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
-    "C:\Users\grben\MilkdropProject\MD2-port\vis_milk2\milkdrop_standalone.vcxproj" `
+    "<repo>\vis_milk2\milkdrop_standalone.vcxproj" `
     /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 `
     /p:WindowsTargetPlatformVersion=10.0.26100.0 /m /v:m /nologo
   ```
@@ -84,7 +84,8 @@ present), whereas the known-good MD3 engine build sets it false.
 (Pristine ns-eel2 code left untouched — the fix is purely a build setting.)
 
 Result: init runs to `PI: all sub-steps OK` -> render loop; window renders a live
-fluid caustic preset (captured to `M1b2_window.png`). Milestone visual verified.
+fluid caustic preset. Milestone visual verified. (The capture showed a stock
+third-party preset and was removed before this repo went public.)
 
 ## REMAINING (non-fatal) — for next session
 Per-frame first-chance `0xC0000005` at `KERNELBASE.dll+0x108AC7`, logged repeatedly
@@ -189,15 +190,15 @@ Three states, and the menu bar is tied to mode:
 - [x] SP1: reproduced (0x80000003, module-less heap addr, varies per run).
 - [x] SP2: located — fault is in AllocateDX9Stuff, post-menu.
 - [x] SP3: root-cause area = NSEEL JIT generated-code breakpoint.
-- [x] SP4: FIXED via LinkIncremental=false; rebuilt; window renders (M1b2_window.png).
+- [x] SP4: FIXED via LinkIncremental=false; rebuilt; window renders (capture removed).
 - [x] SP5: instrumentation stripped, clean rebuild, committed M1b(2) baseline (9f0b3ca).
 - [ ] SP6 (deferred): investigate the per-frame caught AV (KERNELBASE +0x108AC7).
 
 ## MENU BAR — DONE (this session)
 Built the white-room top menu bar for the standalone host. Verified: window shows
 title bar + frame + bar **File · Effects · Sprites · Playlist · Audio · Options ·
-Help** (M1b2_menu.png); WM_COMMAND routing works end-to-end (View Docs toggled the
-F1 help overlay, M1b2_help.png).
+Help**; WM_COMMAND routing works end-to-end (View Docs toggled the F1 help
+overlay). Both captures removed before publication.
 
 Design (all standalone menu code gated behind `MILKDROP_STANDALONE`, defined only in
 milkdrop_standalone.vcxproj → the Winamp DLL build stays byte-for-byte pristine):
