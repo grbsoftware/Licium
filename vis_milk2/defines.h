@@ -104,22 +104,28 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #ifdef MILKDROP_STANDALONE
 // Licium surface identity: the standalone exe's user-visible artifacts (the
-// data/preset folder beside the exe, the ini files, the window class) carry
-// the product name; the engine source keeps its MilkDrop names for
-// provenance/diffability against the pristine Geiss tree. The Winamp DLL
-// build never defines MILKDROP_STANDALONE and keeps every original value.
+// data/preset folder beside the exe, the ini files, the window class and the
+// window caption) carry the product name; the engine source keeps its
+// MilkDrop names for provenance/diffability against the pristine Geiss tree.
+// The Winamp DLL build never defines MILKDROP_STANDALONE and keeps every
+// original value.
 #undef  SUBDIR
 #undef  INIFILE
 #undef  MSG_INIFILE
 #undef  IMG_INIFILE
 #undef  ADAPTERSFILE
 #undef  CLASSNAME
+#undef  SHORTNAME
 #define SUBDIR        L"Licium\\"
 #define INIFILE       L"licium.ini"
 #define MSG_INIFILE   L"licium_msg.ini"
 #define IMG_INIFILE   L"licium_img.ini"
 #define ADAPTERSFILE  L"licium_adapters.txt"
 #define CLASSNAME     L"Licium"
+// NARROW on purpose: SHORTNAME feeds WINDOWCAPTION, which DXContext takes as
+// LPCSTR. Without this the window is born captioned "MilkDrop 2" and only gets
+// retitled a frame later by HostOnWindowCreated.
+#define SHORTNAME     "Licium"
 #endif
 
 // Here you can give names to the buttons (~tabs) along the top
